@@ -1,51 +1,47 @@
 import os
-from fastapi import FastAPI, Request
+import asyncio
+from fastapi import FastAPI
 from telegram import Bot
 import pandas as pd
-import pydantic
-import asyncio
+import requests
 
 app = FastAPI()
 
-# 🤖 Telegram Setup (Get these from BotFather and your chat)
+# 🤖 Telegram Setup (Uses the keys you saved in Render)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 
-# 📊 Helper to calculate technical indicators
+# 📊 Helper to calculate your 9/26 EMAs, RSI, and 5 MACDs from raw bars
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # 1. EMAs
     df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
     
-    # 2. RSI (Relative Strength Index)
+    # 2. RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # 3. The 5 MACD Structures (MACD Line = Fast - Slow)
-    # MACD #1: Normal (12, 26, 9)
+    # 3. MACD #1: Normal (12, 26, 9)
     df['macd1_line'] = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
     df['macd1_signal'] = df['macd1_line'].ewm(span=9, adjust=False).mean()
     
-    # MACD #5: Fast Execution (Multiplied speed)
+    # 4. MACD #5: Fast Execution
     df['macd5_line'] = df['close'].ewm(span=3, adjust=False).mean() - df['close'].ewm(span=6, adjust=False).mean()
     df['macd5_signal'] = df['macd5_line'].ewm(span=2, adjust=False).mean()
     
-    # Simple Swing High / Swing Low logic for Stop Loss
+    # Swing calculations for Stop Loss
     df['low_lows'] = df['low'].rolling(window=5).min()
     df['high_highs'] = df['high'].rolling(window=5).max()
-    
     return df
 
 # ⚙️ Rules Engine
 def check_trading_rules(df: pd.DataFrame):
-    if len(df) < 30:
-        return "Not enough data yet."
-
-    # Get the latest closed candle data
+    if len(df) < 30: return "Waiting for data..."
+    
     current = df.iloc[-1]
     prev = df.iloc[-2]
     
@@ -54,20 +50,14 @@ def check_trading_rules(df: pd.DataFrame):
     ema26 = current['ema26']
     rsi = current['rsi']
     
-    # 1. Trend Direction Rules
     is_bullish_trend = ema9 > ema26
     is_bearish_trend = ema9 < ema26
     
-    # 2. Skip-Trade Filter: Is price touching BOTH EMAs?
-    # (If price high is above the top EMA and price low is below the bottom EMA, it's touching both)
-    top_ema = max(ema9, ema26)
-    bot_ema = min(ema9, ema26)
-    is_touching_both = (current['high'] >= top_ema) and (current['low'] <= bot_ema)
-    
-    if is_touching_both:
-        return "Skip Trade: Price is messy and touching both EMAs."
+    # Skip-Trade Rule: Price touching both EMAs
+    is_touching_both = (current['high'] >= max(ema9, ema26)) and (current['low'] <= min(ema9, ema26))
+    if is_touching_both: return "Skip Trade: Messy market."
 
-    # 3. Check MACD Crossovers (Current state vs Previous state)
+    # MACD Crossover tracking
     macd1_bullish_alert = (prev['macd1_line'] <= prev['macd1_signal']) and (current['macd1_line'] > current['macd1_signal'])
     macd1_bearish_alert = (prev['macd1_line'] >= prev['macd1_signal']) and (current['macd1_line'] < current['macd1_signal'])
     
@@ -76,41 +66,49 @@ def check_trading_rules(df: pd.DataFrame):
 
     # 🟢 BUY RULE EXECUTION
     if is_bullish_trend and close > ema9 and rsi > 30:
-        if macd1_bullish_alert or current['macd1_line'] > current['macd1_signal']: # MACD #1 Alert active
-            if macd5_bullish_cross: # MACD #5 Confirms
-                stop_loss = current['low_lows']
-                return f"🟢 BUY SIGNAL MATCHED!\nPrice: {close}\nStop Loss: {stop_loss}\nRSI: {round(rsi, 2)}"
+        if macd1_bullish_alert or current['macd1_line'] > current['macd1_signal']:
+            if macd5_bullish_cross:
+                return f"🟢 BUY SIGNAL MATCHED (1M)!\nPrice: {close}\nStop Loss: {current['low_lows']}"
 
     # 🔴 SELL RULE EXECUTION
     if is_bearish_trend and close < ema9 and rsi < 70:
-        if macd1_bearish_alert or current['macd1_line'] < current['macd1_signal']: # MACD #1 Alert active
-            if macd5_bearish_cross: # MACD #5 Confirms
-                stop_loss = current['high_highs']
-                return f"🔴 SELL SIGNAL MATCHED!\nPrice: {close}\nStop Loss: {stop_loss}\nRSI: {round(rsi, 2)}"
+        if macd1_bearish_alert or current['macd1_line'] < current['macd1_signal']:
+            if macd5_bearish_cross:
+                return f"🔴 SELL SIGNAL MATCHED (1M)!\nPrice: {close}\nStop Loss: {current['high_highs']}"
+                
+    return "Watching market..."
 
-    return "Watching market... No rules triggered."
+# 🔄 Free Live Data Fetcher Loop (Pulls from Binance Public API)
+async def fetch_market_data_loop():
+    while True:
+        try:
+            # ⏰ CONFIGURED FOR 1-MINUTE TIMEFRAME HERE
+            url = "https://binance.com"
+            response = requests.get(url).json()
+            
+            # Map API structure into simple open, high, low, close numbers
+            data = [[float(c[1]), float(c[2]), float(c[3]), float(c[4])] for c in response]
+            df = pd.DataFrame(data, columns=['open', 'high', 'low', 'close'])
+            
+            # Calculate and check your strategy
+            df = calculate_indicators(df)
+            result = check_trading_rules(df)
+            
+            # Send message to your Telegram if a signal triggers
+            if "SIGNAL MATCHED" in result:
+                await telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=result)
+                
+        except Exception as e:
+            print(f"Error fetching data: {e}")
+            
+        # ⏰ RUNS THE CHECK EVERY 10 SECONDS FOR FAST UPDATES
+        await asyncio.sleep(10)
 
-# 📡 Webhook Target: Send chart data here from TradingView or your data source
-@app.post("/webhook")
-async def receive_signals(request: Request):
-    data = await request.json()
-    
-    # Expecting data format: {"candles": [{"close": 60000, "high": 60100, "low": 59900, "open": 60000}, ...]}
-    if "candles" in data:
-        df = pd.DataFrame(data["candles"])
-        df = calculate_indicators(df)
-        result = check_trading_rules(df)
-        
-        # Send to telegram if it's an actionable signal
-        if "SIGNAL MATCHED" in result:
-            await telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=result)
-            return {"status": "Signal sent to Telegram", "details": result}
-        
-        return {"status": "Processed", "message": result}
-    
-    return {"status": "Error", "message": "Invalid candle data format received."}
+# Start the automated looping worker task when Render boots up
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(fetch_market_data_loop())
 
-# 😴 Keep-Alive route for Render Free Tier
 @app.get("/health")
-def health_check():
+def health_check(): 
     return {"status": "awake"}
