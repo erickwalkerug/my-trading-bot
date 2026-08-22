@@ -18,9 +18,19 @@ API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# Explicit live data URLs for Binance API
+# Live data endpoints for Binance API
 BTC_URL  = "https://binance.com"
 GOLD_URL = "https://binance.com"
+
+def parse_candle_to_dictionary(raw_list_row):
+    """Turns the raw list into a clean dictionary with named word keys."""
+    row = list(raw_list_row)
+    return {
+        "open": float(row[1]),
+        "high": float(row[2]),
+        "low": float(row[3]),
+        "close": float(row[4])
+    }
 
 def fetch_asset_data(url):
     """Fetches raw market candles safely."""
@@ -33,40 +43,32 @@ def fetch_asset_data(url):
     return None
 
 def process_strategy(raw_candles, asset_name, asset_emoji):
-    """Processes your strategy using named variable loops to bypass text-drop bugs."""
+    """Processes your strategy using named dictionaries to bypass formatting bugs."""
     if not raw_candles or len(raw_candles) < 10:
         return f"{asset_emoji} **{asset_name}:** Data stream unavailable..."
 
     try:
-        # 1. Map out the candle rows safely using clear Python iterator functions
-        current_candle_row = list(raw_candles[-2]) # Last fully completed 1m candle
-        prev_candle_row = list(raw_candles[-3])    # Previous completed 1m candle
+        # 1. Convert the active rows into clean named dictionaries
+        current_candle = parse_candle_to_dictionary(raw_candles[-2]) # Last closed candle
+        prev_candle    = parse_candle_to_dictionary(raw_candles[-3]) # Previous candle
 
-        # 2. Extract price metrics by popping positions cleanly without text brackets
-        current_candle_row.pop(0) # Drops timestamp profile
-        open_p  = float(current_candle_row.pop(0))
-        high_p  = float(current_candle_row.pop(0))
-        low_p   = float(current_candle_row.pop(0))
-        close_p = float(current_candle_row.pop(0))
+        open_p     = current_candle["open"]
+        high_p     = current_candle["high"]
+        low_p      = current_candle["low"]
+        close_p    = current_candle["close"]
+        prev_close = prev_candle["close"]
 
-        prev_candle_row.pop(0) # Drops timestamp profile
-        prev_candle_row.pop(0) # Drops open price
-        prev_candle_row.pop(0) # Drops high price
-        prev_candle_row.pop(0) # Drops low price
-        prev_close = float(prev_candle_row.pop(0))
+        # 2. Simple Moving Average Math (3-Period SMA)
+        c0 = parse_candle_to_dictionary(raw_candles[-2])["close"]
+        c1 = parse_candle_to_dictionary(raw_candles[-3])["close"]
+        c2 = parse_candle_to_dictionary(raw_candles[-4])["close"]
+        sma_3 = (c0 + c1 + c2) / 3
 
-        # 3. Simple Moving Average Math (3-Period SMA)
-        close_prices = []
-        for candle in raw_candles[-4:-1]:
-            candle_data = list(candle)
-            close_prices.append(float(candle_data[4]))
-        sma_3 = sum(close_prices) / 3
-
-        # 4. Apply Trend Activation Rules
+        # 3. Apply Trend Activation Rules
         is_bullish_trend = close_p > sma_3 and close_p > prev_close
         is_bearish_trend = close_p < sma_3 and close_p < prev_close
 
-        # 5. Calculate Candlestick Body Structure Metrics
+        # 4. Calculate Candlestick Body Structure Metrics
         candle_range = (high_p - low_p) if (high_p - low_p) > 0 else 0.0001
         candle_body  = abs(close_p - open_p)
         upper_wick   = high_p - max(open_p, close_p)
@@ -82,18 +84,18 @@ def process_strategy(raw_candles, asset_name, asset_emoji):
         else:
             candle_style = "Neutral / Doji ⏳"
 
-        # 6. Extract dynamic swing positions for clean Stop Loss tags
+        # 5. Extract dynamic swing positions for clean Stop Loss tags
         low_prices_pool = []
         high_prices_pool = []
         for candle in raw_candles[-6:-1]:
-            candle_data = list(candle)
-            low_prices_pool.append(float(candle_data[3]))
-            high_prices_pool.append(float(candle_data[2]))
+            parsed = parse_candle_to_dictionary(candle)
+            low_prices_pool.append(parsed["low"])
+            high_prices_pool.append(parsed["high"])
             
         local_swing_low = min(low_prices_pool)
         local_swing_high = max(high_prices_pool)
 
-        # 7. Classify Strategy Direction Outcomes
+        # 6. Classify Strategy Direction Outcomes
         if is_bullish_trend:
             signal_text = "🟢 BUY ACTIVE"
             risk_text = f"🛡️ Stop Loss: ${local_swing_low:,.2f}"
