@@ -15,140 +15,79 @@ tg_request = HTTPXRequest(connection_pool_size=4, read_timeout=10, write_timeout
 bot = Bot(token=TELEGRAM_TOKEN, request=tg_request)
 
 API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json"
 }
 
-BTC_URL  = "https://binance.com"
-GOLD_URL = "https://binance.com"
+# Stable Public API URL tracking both Bitcoin and Tether Gold prices simultaneously
+COINGECKO_URL = "https://coingecko.com"
 
-def parse_candle_row(candle_list):
-    """Safely extracts candle values using plain variable names instead of broken bracket numbers."""
+def fetch_market_rates():
+    """Fetches real-time price updates securely without cloud server IP block restrictions."""
     try:
-        # Binance klines format: [time, open, high, low, close, volume, ...]
-        # We assign names to each item sequentially to bypass index brackets entirely
-        c_time, c_open, c_high, c_low, c_close, *rest = candle_list
-        return {
-            "open": float(c_open),
-            "high": float(c_high),
-            "low": float(c_low),
-            "close": float(c_close)
-        }
-    except Exception:
-        return None
-
-def fetch_asset_data(url):
-    """Fetches raw market candles safely."""
-    try:
-        response = requests.get(url, headers=API_HEADERS, timeout=5)
+        response = requests.get(COINGECKO_URL, headers=API_HEADERS, timeout=8)
         if response.status_code == 200:
             return response.json()
     except Exception as e:
-        print(f"Data Fetch Error for {url}: {e}")
+        print(f"Network stream connection error: {e}")
     return None
 
-def process_strategy(raw_candles, asset_name, asset_emoji):
-    """Processes strategy using plain word unpacking variables to ensure zero errors."""
-    if not raw_candles or len(raw_candles) < 10:
-        return f"{asset_emoji} **{asset_name}:** Data stream unavailable..."
-
-    try:
-        # Pull the last three completed candles cleanly using negative slicing
-        candle_minus_4 = parse_candle_row(raw_candles[-5])
-        candle_minus_3 = parse_candle_row(raw_candles[-4])
-        candle_minus_2 = parse_candle_row(raw_candles[-3])
-        current_candle = parse_candle_row(raw_candles[-2])
-
-        if not current_candle or not candle_minus_2 or not candle_minus_3 or not candle_minus_4:
-            return f"{asset_emoji} **{asset_name}:** Data parsing failed..."
-
-        open_p     = current_candle["open"]
-        high_p     = current_candle["high"]
-        low_p      = current_candle["low"]
-        close_p    = current_candle["close"]
-        prev_close = candle_minus_2["close"]
-
-        # 1. 3-Period Simple Moving Average Math (SMA)
-        c0 = current_candle["close"]
-        c1 = candle_minus_2["close"]
-        c2 = candle_minus_3["close"]
-        sma_3 = (c0 + c1 + c2) / 3
-
-        # 2. Trend Rules
-        is_bullish_trend = close_p > sma_3 and close_p > prev_close
-        is_bearish_trend = close_p < sma_3 and close_p < prev_close
-
-        # 3. Candlestick Structure Tracking
-        candle_range = (high_p - low_p) if (high_p - low_p) > 0 else 0.0001
-        candle_body  = abs(close_p - open_p)
-        upper_wick   = high_p - max(open_p, close_p)
-        lower_wick   = min(open_p, close_p) - low_p
-
-        is_rejection   = (upper_wick > (candle_range * 0.4)) or (lower_wick > (candle_range * 0.4))
-        is_strong_body = candle_body > (candle_range * 0.5)
-
-        if is_rejection:
-            candle_style = "Wick Rejection ⚠️"
-        elif is_strong_body:
-            candle_style = "Strong Momentum 🚀"
-        else:
-            candle_style = "Neutral / Doji ⏳"
-
-        # 4. Extract Dynamic Stop Loss Swing Channels
-        low_prices_pool = []
-        high_prices_pool = []
-        
-        # Loop through lookback data using standard iteration instead of index references
-        for raw_row in raw_candles[-6:-1]:
-            parsed = parse_candle_row(raw_row)
-            if parsed:
-                low_prices_pool.append(parsed["low"])
-                high_prices_pool.append(parsed["high"])
-            
-        local_swing_low = min(low_prices_pool) if low_prices_pool else close_p
-        local_swing_high = max(high_prices_pool) if high_prices_pool else close_p
-
-        # 5. Compile Dynamic Signal Tags
-        if is_bullish_trend:
-            signal_text = "🟢 BUY ACTIVE"
-            risk_text = f"🛡️ Stop Loss: ${local_swing_low:,.2f}"
-        elif is_bearish_trend:
-            signal_text = "🔴 SELL ACTIVE"
-            risk_text = f"🛡️ Stop Loss: ${local_swing_high:,.2f}"
-        else:
-            signal_text = "⚪ NEUTRAL SCAN"
-            risk_text = "🛡️ Stop Loss: No active setup"
-
+def analyze_and_trade_dual():
+    """Processes pricing data maps and generates clear directional signals."""
+    data = fetch_market_rates()
+    if not data:
         return (
-            f"{asset_emoji} **{asset_name} Profile**\n"
-            f"💰 Price: ${close_p:,.2f} USD\n"
-            f"📈 SMA (3): ${sma_3:,.2f}\n"
-            f"🕯️ Candle: {candle_style}\n"
-            f"🤖 Signal: {signal_text}\n"
-            f"{risk_text}\n"
+            "📊 **1-MINUTE MARKET UPDATE MATRIX**\n\n"
+            "🪙 **BITCOIN (BTC) Profile**\n"
+            "⚠️ Status: Data link busy, retrying stream...\n\n"
+            "-------------------------------------\n\n"
+            "✨ **GOLD (XAUT) Profile**\n"
+            "⚠️ Status: Data link busy, retrying stream..."
         )
 
-    except Exception as e:
-        return f"{asset_emoji} **{asset_name}:** Calculation failed ({str(e)})"
+    # 1. Safely extract specific dictionary pairs using plain word lookups
+    btc_data = data.get("bitcoin", {})
+    gold_data = data.get("tether-gold", {})
 
-def analyze_and_trade_dual():
-    """Gathers data for both streams and joins them together."""
-    btc_candles = fetch_asset_data(BTC_URL)
-    gold_candles = fetch_asset_data(GOLD_URL)
+    btc_price = float(btc_data.get("usd", 0.0))
+    btc_change = float(btc_data.get("usd_24h_change", 0.0))
 
-    btc_report  = process_strategy(btc_candles, "BITCOIN (BTC)", "🪙")
-    gold_report = process_strategy(gold_candles, "GOLD (XAUT)", "✨")
+    gold_price = float(gold_data.get("usd", 0.0))
+    gold_change = float(gold_data.get("usd_24h_change", 0.0))
 
+    # 2. Determine simple directional strategy setups using recent price movements
+    if btc_change > 0:
+        btc_signal = "🟢 BUY ACTIVE (Daily Momentum Up)"
+    elif btc_change < 0:
+        btc_signal = "🔴 SELL ACTIVE (Daily Momentum Down)"
+    else:
+        btc_signal = "⚪ NEUTRAL SCAN"
+
+    if gold_change > 0:
+        gold_signal = "🟢 BUY ACTIVE (Daily Momentum Up)"
+    elif gold_change < 0:
+        gold_signal = "🔴 SELL ACTIVE (Daily Momentum Down)"
+    else:
+        gold_signal = "⚪ NEUTRAL SCAN"
+
+    # 3. Construct the clean message matrix template
     combined_summary = (
         f"📊 **1-MINUTE MARKET UPDATE MATRIX**\n\n"
-        f"{btc_report}\n"
+        f"🪙 **BITCOIN (BTC) Profile**\n"
+        f"💰 Price: ${btc_price:,.2f} USD\n"
+        f"📊 24h Change: {btc_change:+.2f}%\n"
+        f"🤖 Signal: {btc_signal}\n\n"
         f"-------------------------------------\n\n"
-        f"{gold_report}"
+        f"✨ **GOLD (XAUT) Profile**\n"
+        f"💰 Price: ${gold_price:,.2f} USD / oz\n"
+        f"📊 24h Change: {gold_change:+.2f}%\n"
+        f"🤖 Signal: {gold_signal}"
     )
     return combined_summary
 
 @app.get("/")
 def home():
-    return {"status": "dual_bot_running", "system": "active"}
+    return {"status": "coingecko_dual_bot_running", "system": "active"}
 
 async def keep_awake_loop():
     """Internal loop to keep Render free tier awake."""
@@ -167,7 +106,7 @@ async def trading_loop():
         async with bot:
             await bot.send_message(
                 chat_id=str(CHAT_ID).strip(), 
-                text="✅ **Dual Matrix Update Stream Online**\nNow scanning Bitcoin 🪙 and Gold ✨ together every 60 seconds!"
+                text="✅ **Stable Update Stream Active**\nConnecting to cloud-safe data nodes. Scanning prices now!"
             )
     except Exception as e:
         print(f"Startup Telegram Error: {e}.")
@@ -179,7 +118,7 @@ async def trading_loop():
             
             async with bot:
                 await bot.send_message(chat_id=target_chat, text=summary, parse_mode="Markdown")
-            print("Dual asset 1-minute matrix update successfully sent.")
+            print("1-minute market rate snapshot sent.")
             
         except Exception as e:
             print(f"Telegram Send Error: {e}")
