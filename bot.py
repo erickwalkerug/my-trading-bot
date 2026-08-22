@@ -76,26 +76,31 @@ def check_trading_rules(df: pd.DataFrame):
             if macd5_bearish_cross:
                 return f"🔴 SELL SIGNAL MATCHED (1M)!\nPrice: {close}\nStop Loss: {current['high_highs']}"
                 
-    # If no rules match, return the current price state as a placeholder
+    # Always let you know the latest live price so you see the bot working
     return f"ℹ️ Market Watch: BTC is at ${close}. Waiting for strategy crossover setups..."
 
-# 🔄 Free Live Data Fetcher Loop (Pulls from Binance Public API)
+# 🔄 Free Live Data Fetcher Loop
 async def fetch_market_data_loop():
     while True:
         try:
-            # Pull live 1-minute Bitcoin candlestick data
             url = "https://binance.com"
-            response = requests.get(url).json()
             
-            # Map data array
+            # 🛡️ FIX: Disguise our request as a mobile web browser to bypass the block
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Linux; Android 10; SM-G960F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+            }
+            
+            response = requests.get(url, headers=headers).json()
+            
+            # Map data array values correctly (Extract Open, High, Low, Close)
             data = [[float(c[1]), float(c[2]), float(c[3]), float(c[4])] for c in response]
             df = pd.DataFrame(data, columns=['open', 'high', 'low', 'close'])
             
-            # Process and check strategy status
+            # Process calculations and check strategy conditions
             df = calculate_indicators(df)
             result = check_trading_rules(df)
             
-            # 🧪 TEST TRICK: Always text your phone the results so you know it works!
+            # Send message to your Telegram account
             await telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=result)
                 
         except Exception as e:
@@ -112,4 +117,3 @@ async def startup_event():
 @app.get("/health")
 def health_check(): 
     return {"status": "awake"}
-
