@@ -14,56 +14,44 @@ CHAT_ID = os.environ.get("CHAT_ID", "8919300615")
 tg_request = HTTPXRequest(connection_pool_size=4, read_timeout=10, write_timeout=10)
 bot = Bot(token=TELEGRAM_TOKEN, request=tg_request)
 
+# Using standard browser headers to look like a normal human user visit
 API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# Verified public endpoints from the official Kraken API Network
-BTC_KRAKEN_URL  = "https://kraken.com"
-GOLD_KRAKEN_URL = "https://kraken.com"
+# Unrestricted Yahoo Finance API links tracking Bitcoin (BTC-USD) and Gold (GC=F)
+BTC_YAHOO_URL  = "https://yahoo.com"
+GOLD_YAHOO_URL = "https://yahoo.com"
 
-def fetch_kraken_btc():
-    """Fetches real live Bitcoin price from the Kraken API endpoint."""
+def fetch_yahoo_price(url):
+    """Fetches real live prices from Yahoo Finance's open-access network layer."""
     try:
-        response = requests.get(BTC_KRAKEN_URL, headers=API_HEADERS, timeout=6)
+        response = requests.get(url, headers=API_HEADERS, timeout=6)
         if response.status_code == 200:
             data = response.json()
-            # Navigate Kraken's nested structure safely
-            result_data = data.get("result", {})
-            pair_data = result_data.get("XXBTZUSD", {})
-            close_data = pair_data.get("c", [])
-            # Read index position 0 to grab the complete pricing string value
-            if close_data:
-                return float(close_data[0])
+            # Safely navigate Yahoo Finance's data tree without any bracket symbols
+            chart_data = data.get("chart", {})
+            result_list = chart_data.get("result", [])
+            if result_list:
+                first_result = result_list[0]
+                meta_data = first_result.get("meta", {})
+                current_price = meta_data.get("regularMarketPrice")
+                if current_price:
+                    return float(current_price)
     except Exception as e:
-        print(f"Kraken BTC Data Link Error: {e}")
-    return 0.0
-
-def fetch_kraken_gold():
-    """Fetches real live Gold price from the Kraken API endpoint."""
-    try:
-        response = requests.get(GOLD_KRAKEN_URL, headers=API_HEADERS, timeout=6)
-        if response.status_code == 200:
-            data = response.json()
-            # Navigate Kraken's nested structure safely
-            result_data = data.get("result", {})
-            pair_data = result_data.get("XAUTUSD", {})
-            close_data = pair_data.get("c", [])
-            # Read index position 0 to grab the complete pricing string value
-            if close_data:
-                return float(close_data[0])
-    except Exception as e:
-        print(f"Kraken Gold Data Link Error: {e}")
+        print(f"Yahoo Fetch Error: {e}")
     return 0.0
 
 def analyze_and_trade_dual():
-    """Compiles the market pricing snapshots into a clean template layout."""
-    btc_price = fetch_kraken_btc()
-    gold_price = fetch_kraken_gold()
+    """Compiles clean market pricing metrics using unrestricted data streams."""
+    btc_price = fetch_yahoo_price(BTC_YAHOO_URL)
+    gold_price = fetch_yahoo_price(GOLD_YAHOO_URL)
 
+    # Format the display values cleanly
     btc_display = f"${btc_price:,.2f} USD" if btc_price > 0 else "⚠️ Data node busy"
     gold_display = f"${gold_price:,.2f} USD / oz" if gold_price > 0 else "⚠️ Data node busy"
 
+    # Set up our live indicator signal tags
     btc_signal = "🟢 BUY ACTIVE (Momentum Target Open)" if btc_price > 0 else "⏳ Scanning..."
     gold_signal = "🟢 BUY ACTIVE (Momentum Target Open)" if gold_price > 0 else "⏳ Scanning..."
 
@@ -73,7 +61,7 @@ def analyze_and_trade_dual():
         f"💰 Price: {btc_display}\n"
         f"🤖 Signal: {btc_signal}\n\n"
         f"-------------------------------------\n\n"
-        f"✨ **GOLD (XAUT) Profile**\n"
+        f"✨ **GOLD (XAUT/XAU) Profile**\n"
         f"💰 Price: {gold_display}\n"
         f"🤖 Signal: {gold_signal}"
     )
@@ -81,7 +69,7 @@ def analyze_and_trade_dual():
 
 @app.get("/")
 def home():
-    return {"status": "kraken_dual_bot_running", "system": "active"}
+    return {"status": "yahoo_unrestricted_running", "system": "active"}
 
 async def keep_awake_loop():
     """Internal loop to keep Render free tier awake."""
@@ -95,12 +83,12 @@ async def keep_awake_loop():
         await asyncio.sleep(240)
 
 async def trading_loop():
-    """Tracks Bitcoin and Gold every 60 seconds and pushes updates."""
+    """Tracks Bitcoin and Gold every 60 seconds and pushes separated updates."""
     try:
         async with bot:
             await bot.send_message(
                 chat_id=str(CHAT_ID).strip(), 
-                text="✅ **Kraken Matrix Core Stream Synchronized**\nConnected to unrestricted system channels. Streaming active feeds now!"
+                text="✅ **Yahoo Open-Stream Synchronized**\nConnected to unrestricted data networks. Streaming live prices now!"
             )
     except Exception as e:
         print(f"Startup Telegram Error: {e}.")
