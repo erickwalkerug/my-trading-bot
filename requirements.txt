@@ -1,8 +1,7 @@
 fastapi
 uvicorn
 requests
-pandas
-pandas_ta
 python-telegram-bot
 httpx
+
 
