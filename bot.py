@@ -11,7 +11,7 @@ app = FastAPI()
 
 # 2. Grab your secret tokens automatically from Render environment variables
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
-CHAT_ID = os.environ.get("CHAT_ID", "8919300615")  # Added your ID directly as a safe backup fallback
+CHAT_ID = os.environ.get("CHAT_ID", "8919300615")  # Fixed Chat ID backup
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # 3. Custom browser headers to prevent empty data responses
@@ -19,8 +19,8 @@ API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-# Upgraded to CoinDesk API - highly reliable and rarely blocks servers
-DATA_URL = "https://coindesk.com"
+# Switched to Blockchain.info ticker API - 100% free and open public data feed
+DATA_URL = "https://blockchain.info"
 
 def fetch_market_data():
     """Fetches market information safely without getting blocked."""
@@ -39,8 +39,8 @@ def analyze_and_trade():
         return "Failed to grab a clean data payload from the API server."
     
     try:
-        # Extracting price safely from the CoinDesk structure
-        btc_price = raw_data.get("bpi", {}).get("USD", {}).get("rate", "Unknown")
+        # Extracting USD buying price safely from Blockchain.info's data structure
+        btc_price = raw_data.get("USD", {}).get("buy", "Unknown")
         return f"Market Sweep Complete. Current Bitcoin Price: ${btc_price} USD"
     except Exception as e:
         return f"Data parsed incorrectly: {e}"
@@ -56,7 +56,6 @@ async def keep_awake_loop():
     while True:
         try:
             port = os.environ.get('PORT', 10000)
-            # Pings home endpoint to keep the free container active
             requests.get(f"http://127.0.0.1:{port}/", timeout=5)
             print("Pinging system self to stay awake!")
         except Exception as e:
@@ -71,7 +70,6 @@ async def trading_loop():
         try:
             summary = analyze_and_trade()
             print(summary)
-            # Clean string parsing for CHAT_ID execution
             target_chat = str(CHAT_ID).strip()
             await bot.send_message(chat_id=target_chat, text=summary)
         except Exception as e:
