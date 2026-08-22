@@ -5,7 +5,6 @@ import uvicorn
 from telegram import Bot
 from telegram.request import HTTPXRequest
 import asyncio
-from operator import itemgetter
 
 app = FastAPI()
 
@@ -19,46 +18,46 @@ API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# Kraken's live unrestricted API endpoints
+# Verified public endpoints from the official Kraken API Network
 BTC_KRAKEN_URL  = "https://kraken.com"
 GOLD_KRAKEN_URL = "https://kraken.com"
 
-# FIXED: Replaced temporary labels with Kraken's formal system database keys
-get_result_field = itemgetter("result")
-get_btc_pair_field = itemgetter("XXBTZUSD")  # Kraken's internal system key for BTC/USDT
-get_gold_pair_field = itemgetter("XAUTUSD")   # Kraken's internal system key for GOLD/USDT
-get_ticker_data_list = itemgetter("c")
-
 def fetch_kraken_btc():
-    """Fetches real live Bitcoin price from Kraken's open node network."""
+    """Fetches real live Bitcoin price from the Kraken API endpoint."""
     try:
         response = requests.get(BTC_KRAKEN_URL, headers=API_HEADERS, timeout=6)
         if response.status_code == 200:
             data = response.json()
-            result = get_result_field(data)
-            pair_data = get_btc_pair_field(result)
-            price_list = get_ticker_data_list(pair_data)
-            return float(next(iter(price_list)))
+            # Navigate Kraken's nested structure safely
+            result_data = data.get("result", {})
+            pair_data = result_data.get("XXBTZUSD", {})
+            close_data = pair_data.get("c", [])
+            # Read index position 0 to grab the complete pricing string value
+            if close_data:
+                return float(close_data[0])
     except Exception as e:
-        print(f"Kraken BTC Processing Error: {e}")
+        print(f"Kraken BTC Data Link Error: {e}")
     return 0.0
 
 def fetch_kraken_gold():
-    """Fetches real live Gold price from Kraken's open node network."""
+    """Fetches real live Gold price from the Kraken API endpoint."""
     try:
         response = requests.get(GOLD_KRAKEN_URL, headers=API_HEADERS, timeout=6)
         if response.status_code == 200:
             data = response.json()
-            result = get_result_field(data)
-            pair_data = get_gold_pair_field(result)
-            price_list = get_ticker_data_list(pair_data)
-            return float(next(iter(price_list)))
+            # Navigate Kraken's nested structure safely
+            result_data = data.get("result", {})
+            pair_data = result_data.get("XAUTUSD", {})
+            close_data = pair_data.get("c", [])
+            # Read index position 0 to grab the complete pricing string value
+            if close_data:
+                return float(close_data[0])
     except Exception as e:
-        print(f"Kraken Gold Processing Error: {e}")
+        print(f"Kraken Gold Data Link Error: {e}")
     return 0.0
 
 def analyze_and_trade_dual():
-    """Compiles market pricing details securely using Kraken data feeds."""
+    """Compiles the market pricing snapshots into a clean template layout."""
     btc_price = fetch_kraken_btc()
     gold_price = fetch_kraken_gold()
 
@@ -96,7 +95,7 @@ async def keep_awake_loop():
         await asyncio.sleep(240)
 
 async def trading_loop():
-    """Tracks Bitcoin and Gold every 60 seconds and pushes separated updates."""
+    """Tracks Bitcoin and Gold every 60 seconds and pushes updates."""
     try:
         async with bot:
             await bot.send_message(
