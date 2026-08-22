@@ -1,7 +1,5 @@
-
-fastapi
-uvicorn
 requests
-python-telegram-bot
-httpx
+pandas
+ta
+yfinance
 
