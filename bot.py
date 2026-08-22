@@ -1,6 +1,12 @@
+# 🌐 DUMMY WEB PORT LISTENER (Satisfies Render's web service scan)
+import http.server
+import socketserver
+import threading
+threading.Thread(target=lambda: socketserver.TCPServer(("", 10000), http.server.SimpleHTTPRequestHandler).serve_forever(), daemon=True).start()
+
+# 📈 TRADING ENGINE CORE MODULES
 import time
 import requests
-import threading
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -31,10 +37,7 @@ def get_market_data_frame(symbol):
         return None
 
 def process_strategy_logic(df):
-    """
-    Executes your multi-layered strategy matrix rules.
-    Returns: (SIGNAL_STRING, STOP_LOSS_VALUE, TAKE_PROFIT_VALUE)
-    """
+    """Executes your multi-layered strategy matrix rules."""
     close_prices = df['close']
     high_prices = df['high']
     low_prices = df['low']
@@ -71,38 +74,25 @@ def process_strategy_logic(df):
     macd_crossed_bearish = (macd_line.iloc[-2] >= signal_line.iloc[-2]) and (macd_line.iloc[-1] < signal_line.iloc[-1])
 
     # 🔔 FINAL COMPREHENSIVE SIGNAL LOGIC MATCHING WITH SL & TP
-    # BUY SETUP
-    if (ema_direction > 0 and 
-        current_price > ema9.iloc[-1] and 
-        current_rsi > 30 and 
-        macd_crossed_bullish):
-        
+    if (ema_direction > 0 and current_price > ema9.iloc[-1] and current_rsi > 30 and macd_crossed_bullish):
         sl_level = prev_swing_low - (prev_swing_low * 0.0002) 
         risk_distance = current_price - sl_level
         tp_level = current_price + (risk_distance * RISK_REWARD_RATIO)
         return "🟢 BUY ACTIVE (Momentum Target Open)", f"${sl_level:,.2f}", f"${tp_level:,.2f}"
 
-    # SELL SETUP
-    elif (ema_direction < 0 and 
-          current_price < ema9.iloc[-1] and 
-          current_rsi < 70 and 
-          macd_crossed_bearish):
-          
+    elif (ema_direction < 0 and current_price < ema9.iloc[-1] and current_rsi < 70 and macd_crossed_bearish):
         sl_level = prev_swing_high + (prev_swing_high * 0.0002)
         risk_distance = sl_level - current_price
         tp_level = current_price - (risk_distance * RISK_REWARD_RATIO)
         return "🔴 SELL ACTIVE (Take Profit Target Reached)", f"${sl_level:,.2f}", f"${tp_level:,.2f}"
 
-    # DEFAULT 1-MINUTE CONTINUOUS UPDATE STATUS
     else:
-        # If no active trade entry crossover is happening right now, show current trend status
         trend_status = "🟢 BULLISH TREND" if ema_direction > 0 else "🔴 BEARISH TREND"
         return f"🟡 HOLD ACTIVE ({trend_status})", "N/A", "N/A"
 
 def send_telegram_matrix(btc_data, gold_data):
     """Combines both markets into a single clean message and sends it every minute."""
     url = f"https://telegram.org{TOKEN}/sendMessage"
-    
     current_time = datetime.now().strftime('%H:%M')
 
     market_message = (
@@ -119,11 +109,7 @@ def send_telegram_matrix(btc_data, gold_data):
         f"⏰ Matrix Time: {current_time} | Timeframe: 1m"
     )
     
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": market_message,
-        "parse_mode": "Markdown"
-    }
+    payload = {"chat_id": CHAT_ID, "text": market_message, "parse_mode": "Markdown"}
     try:
         requests.post(url, json=payload, timeout=10)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 1-Minute Matrix broadcast sent.")
@@ -142,30 +128,25 @@ def self_awake_ping_loop():
 def market_analysis_execution():
     """Main checking engine running tightly every 60 seconds."""
     while True:
-        # Fetch Bitcoin & Gold frames
         df_btc = get_market_data_frame("BTC-USD")
         df_gold = get_market_data_frame("GC=F")
         
         if df_btc is not None and df_gold is not None:
-            # Run calculations
             btc_price = float(df_btc['close'].iloc[-1])
             btc_sig, btc_sl, btc_tp = process_strategy_logic(df_btc)
             
             gold_price = float(df_gold['close'].iloc[-1])
             gold_sig, gold_sl, gold_tp = process_strategy_logic(df_gold)
             
-            # Packages data packages
             btc_package = {"price": btc_price, "signal": btc_sig, "sl": btc_sl, "tp": btc_tp}
             gold_package = {"price": gold_price, "signal": gold_sig, "sl": gold_sl, "tp": gold_tp}
             
-            # Send combined 1-minute alert layout
             send_telegram_matrix(btc_package, gold_package)
                 
-        # ⏳ Strict 1-Minute (60 seconds) wait time interval
         time.sleep(60)
 
 if __name__ == "__main__":
-    print("1-Minute Strategy Matrix ready. Starting bot.py runtime core...")
+    print("1-Minute Strategy Matrix ready with automated port bindings.")
     
     awake_worker = threading.Thread(target=self_awake_ping_loop, daemon=True)
     awake_worker.start()
