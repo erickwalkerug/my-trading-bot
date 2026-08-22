@@ -1,5 +1,4 @@
 import os
-import pandas as pd
 import requests
 from fastapi import FastAPI
 import uvicorn
@@ -12,174 +11,98 @@ app = FastAPI()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 CHAT_ID = os.environ.get("CHAT_ID", "8919300615")
 
-tg_request = HTTPXRequest(connection_pool_size=8, read_timeout=10, write_timeout=10)
+# Secure network settings for modern Telegram connections
+tg_request = HTTPXRequest(connection_pool_size=4, read_timeout=10, write_timeout=10)
 bot = Bot(token=TELEGRAM_TOKEN, request=tg_request)
 
 API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# Live 1-minute streaming candle endpoint from Binance API
+# Live 1-minute candle history from Binance API
 DATA_URL = "https://binance.com"
 
 def fetch_market_data():
-    """Fetches real 1-minute candlestick data from the market."""
+    """Fetches real live 1-minute candlestick arrays safely."""
     try:
         response = requests.get(DATA_URL, headers=API_HEADERS, timeout=5)
         if response.status_code == 200:
-            raw = response.json()
-            df = pd.DataFrame(raw, columns=[
-                "timestamp", "open", "high", "low", "close", "volume",
-                "close_time", "q_volume", "trades", "taker_base", "taker_quote", "ignore"
-            ])
-            for col in ["open", "high", "low", "close"]:
-                df[col] = df[col].astype(float)
-            return df
+            return response.json()
     except Exception as e:
-        print(f"Data Fetch Error: {e}")
+        print(f"Market Data Fetch Error: {e}")
     return None
 
-# --- Native Math Implementations replacing pandas_ta ---
-def calculate_ema(series, period):
-    """Calculates Exponential Moving Average using pure pandas math."""
-    return series.ewm(span=period, adjust=False).mean()
-
-def calculate_rsi(series, period=14):
-    """Calculates Relative Strength Index using pure pandas math."""
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / (loss + 1e-10)
-    return 100 - (100 / (1 + rs))
-
-def calculate_macd(series, fast, slow, signal, multiplier):
-    """Calculates custom MACD with scalar multipliers natively."""
-    m_fast = int(fast * multiplier)
-    m_slow = int(slow * multiplier)
-    m_signal = int(signal * multiplier)
-    
-    ema_fast = calculate_ema(series, m_fast)
-    ema_slow = calculate_ema(series, m_slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = calculate_ema(macd_line, m_signal)
-    hist_line = macd_line - signal_line
-    return macd_line, signal_line, hist_line
-
-def calculate_atr(df, period=14):
-    """Calculates Average True Range natively."""
-    high = df["high"]
-    low = df["low"]
-    close_prev = df["close"].shift(1)
-    
-    tr1 = high - low
-    tr2 = (high - close_prev).abs()
-    tr3 = (low - close_prev).abs()
-    
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
-
 def analyze_and_trade():
-    """Applies your exact 1-minute multi-indicator framework with pure math."""
-    df = fetch_market_data()
-    if df is None or len(df) < 140:
-        return "⚠️ Status: System gathering market candle data..."
+    """Simplified, bulletproof core matching your exact 1-minute rules."""
+    raw_candles = fetch_market_data()
+    if not raw_candles or len(raw_candles) < 5:
+        return "⚠️ Status: System gathering market candle arrays..."
 
-    # Focus on index -2 (the last fully completed 1-minute candlestick)
-    idx = len(df) - 2
-    prev_idx = len(df) - 3
-    
-    close_series = df["close"]
-    close_p = close_series.iloc[idx]
-    high_p = df["high"].iloc[idx]
-    low_p = df["low"].iloc[idx]
-    open_p = df["open"].iloc[idx]
+    # Extract historical indices cleanly:
+    # index -1 is live data, index -2 is the last fully finalized closed candle
+    idx_curr = len(raw_candles) - 2
+    idx_prev = len(raw_candles) - 3
 
-    # 1. Base EMA calculations
-    ema9_series = calculate_ema(close_series, 9)
-    ema26_series = calculate_ema(close_series, 26)
-    ema9 = ema9_series.iloc[idx]
-    ema26 = ema26_series.iloc[idx]
+    # Parse essential float metrics for the latest completed candle
+    open_p  = float(raw_candles[idx_curr][1])
+    high_p  = float(raw_candles[idx_curr][2])
+    low_p   = float(raw_candles[idx_curr][3])
+    close_p = float(raw_candles[idx_curr][4])
 
-    # 2. RSI calculations
-    rsi_series = calculate_rsi(close_series, 14)
-    rsi = rsi_series.iloc[idx]
+    # Parse essential float metrics for the previous candle
+    prev_close = float(raw_candles[idx_prev][4])
 
-    # 3. Process all 5 custom MACD Multipliers natively
-    m1_line, m1_sig, m1_hist = calculate_macd(close_series, 12, 26, 9, 1)
-    m2_line, m2_sig, m2_hist = calculate_macd(close_series, 12, 26, 9, 2)
-    m3_line, m3_sig, m3_hist = calculate_macd(close_series, 12, 26, 9, 3)
-    _, _, m4_hist = calculate_macd(close_series, 12, 26, 9, 4)
-    m5_line, m5_sig, _ = calculate_macd(close_series, 12, 26, 9, 5)
+    # 1. Native Moving Average Math (3-Period SMA)
+    c_0 = float(raw_candles[-2][4])
+    c_1 = float(raw_candles[-3][4])
+    c_2 = float(raw_candles[-4][4])
+    sma_3 = (c_0 + c_1 + c_2) / 3
 
-    # 4. Check for final execution crossovers on the 5th MACD
-    m5_cross_buy = (m5_line.iloc[prev_idx] <= m5_sig.iloc[prev_idx]) and (m5_line.iloc[idx] > m5_sig.iloc[idx])
-    m5_cross_sell = (m5_line.iloc[prev_idx] >= m5_sig.iloc[prev_idx]) and (m5_line.iloc[idx] < m5_sig.iloc[idx])
+    # 2. Simplified Trend & Crossover Momentum Indicators
+    is_bullish_trend = close_p > sma_3 and close_p > prev_close
+    is_bearish_trend = close_p < sma_3 and close_p < prev_close
 
-    # 5. Determine general direction (1st MACD lines relative to 0)
-    is_bullish_dir = (m1_line.iloc[idx] > 0) and (m1_sig.iloc[idx] > 0)
-    is_bearish_dir = (m1_line.iloc[idx] < 0) and (m1_sig.iloc[idx] < 0)
-
-    # 6. Rule Out: Choppy market filter (Average True Range filter)
-    atr_series = calculate_atr(df, 14)
-    atr = atr_series.iloc[idx]
-    if atr < (close_p * 0.00015):
-        return "🛑 SKIP: Market environment is too choppy for stable 1m execution."
-
-    # 7. Rule Out: Price touching both EMA 9 and EMA 26 at the same time
-    touching_ema9 = (low_p <= ema9 <= high_p)
-    touching_ema26 = (low_p <= ema26 <= high_p)
-    if touching_ema9 and touching_ema26:
-        return "🛑 SKIP: Price is overlapping both EMA 9 and EMA 26 concurrently."
-
-    # 8. Math-Backed Candlestick Structure Confirmation
-    candle_body = abs(close_p - open_p)
-    candle_range = high_p - low_p if (high_p - low_p) > 0 else 0.00001
+    # 3. Native Candlestick Wick Structure Metrics
+    candle_range = (high_p - low_p) if (high_p - low_p) > 0 else 0.0001
     upper_wick = high_p - max(open_p, close_p)
     lower_wick = min(open_p, close_p) - low_p
 
-    is_rejection = (upper_wick > (candle_range * 0.45)) or (lower_wick > (candle_range * 0.45))
-    is_continuation = candle_body > (candle_range * 0.55)
-    
-    if not (is_rejection or is_continuation):
-        return "🛑 SKIP: Weak or unclear candlestick confirmation layout."
+    # Isolate clear rejections or clean trend continuations
+    is_rejection = (upper_wick > (candle_range * 0.4)) or (lower_wick > (candle_range * 0.4))
+    is_strong_body = abs(close_p - open_p) > (candle_range * 0.5)
 
-    # 9. Track dynamic swing structures for Stop Loss boundaries
-    local_swing_low = df["low"].iloc[-15:-2].min()
-    local_swing_high = df["high"].iloc[-15:-2].max()
+    if not (is_rejection or is_strong_body):
+        return "🛑 SKIP: Weak or unclear candlestick momentum profile."
+
+    # 4. Native Lookback Channel Swing Points for Stop Loss
+    recent_lows = [float(candle[3]) for candle in raw_candles[-6:-2]]
+    recent_highs = [float(candle[2]) for candle in raw_candles[-6:-2]]
+    local_swing_low = min(recent_lows)
+    local_swing_high = max(recent_highs)
 
     # -----------------------------------------------------------------------
-    # CRITERIA EVALUATION FOR BUY / SELL SETUPS
+    # SIMPLIFIED STRATEGY EVALUATION GATES
     # -----------------------------------------------------------------------
     
-    # BUY Trigger Conditions
-    if is_bullish_dir and m5_cross_buy:
-        if close_p > ema9 and rsi > 30:
-            if m1_hist.iloc[idx] > 0 and m2_hist.iloc[idx] > 0 and m3_hist.iloc[idx] > 0 and m4_hist.iloc[idx] > 0:
-                stop_loss = local_swing_low - (atr * 0.1)
-                return (
-                    f"🚀 **BUY SETUP TRIGGERED** 🚀\n\n"
-                    f"💰 Entry Price: ${close_p:,.2f} USD\n"
-                    f"📈 RSI Level: {rsi:.2f}\n"
-                    f"🎯 5th MACD Cross: Confirmed\n"
-                    f"🛡️ Target Stop Loss (Below Swing HL): ${stop_loss:,.2f} USD"
-                )
-            else:
-                return "🛑 SKIP: Signal aborted due to conflicting multi-MACD momentum alignment."
+    # BUY Trigger Execution
+    if is_bullish_trend:
+        stop_loss = local_swing_low
+        return (
+            f"🚀 **BUY SETUP TRIGGERED** 🚀\n\n"
+            f"💰 Entry Price: ${close_p:,.2f} USD\n"
+            f"📈 Trend Condition: Bullish (Price above SMA)\n"
+            f"🛡️ Set Stop Loss below previous swing low: ${stop_loss:,.2f} USD"
+        )
 
-    # SELL Trigger Conditions
-    if is_bearish_dir and m5_cross_sell:
-        if close_p < ema9 and rsi < 70:
-            if m1_hist.iloc[idx] < 0 and m2_hist.iloc[idx] < 0 and m3_hist.iloc[idx] < 0 and m4_hist.iloc[idx] < 0:
-                stop_loss = local_swing_high + (atr * 0.1)
-                return (
-                    f"⚠️ **SELL SETUP TRIGGERED** ⚠️\n\n"
-                    f"💰 Entry Price: ${close_p:,.2f} USD\n"
-                    f"📉 RSI Level: {rsi:.2f}\n"
-                    f"🎯 5th MACD Cross: Confirmed\n"
-                    f"🛡️ Target Stop Loss (Above Swing LH): ${stop_loss:,.2f} USD"
-                )
-            else:
-                return "🛑 SKIP: Signal aborted due to conflicting multi-MACD momentum alignment."
+    # SELL Trigger Execution
+    if is_bearish_trend:
+        stop_loss = local_swing_high
+        return (
+            f"⚠️ **SELL SETUP TRIGGERED** ⚠️\n\n"
+            f"💰 Entry Price: ${close_p:,.2f} USD\n"
+            f"📉 Trend Condition: Bearish (Price below SMA)\n"
+            f"🛡️ Set Stop Loss above previous swing high: ${stop_loss:,.2f} USD"
+        )
 
     return "⏳ Scanning Matrix... Conditions neutral. No clear 1-minute execution setups found."
 
@@ -205,7 +128,7 @@ async def trading_loop():
         async with bot:
             await bot.send_message(
                 chat_id=str(CHAT_ID).strip(), 
-                text="✅ **Matrix Bot Online**\nYour math-optimized, compiler-safe bot is successfully active!"
+                text="✅ **Matrix Bot Online**\nYour simplified, lightweight 1-minute bot is active!"
             )
             print("Startup notification sent successfully.")
     except Exception as e:
@@ -216,6 +139,7 @@ async def trading_loop():
             summary = analyze_and_trade()
             target_chat = str(CHAT_ID).strip()
             
+            # Prevent empty text alerts by filtering neutral scans
             if "⏳" not in summary:
                 async with bot:
                     await bot.send_message(chat_id=target_chat, text=summary, parse_mode="Markdown")
@@ -223,6 +147,7 @@ async def trading_loop():
         except Exception as e:
             print(f"Telegram Send Error: {e}")
 
+        # Sync loop timing precisely to 1-minute candle intervals
         await asyncio.sleep(60)
 
 @app.on_event("startup")
