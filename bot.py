@@ -14,7 +14,7 @@ from ta.trend import ema_indicator, macd, macd_signal
 from ta.momentum import rsi
 from datetime import datetime
 
-# 🔑 HARDWARE KEY CONFIGURATION (Replace with your actual details)
+# 🔑 HARDWARE KEY CONFIGURATION
 TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 CHAT_ID = "YOUR_PERSONAL_CHAT_ID"
 
@@ -26,7 +26,8 @@ def get_market_data_frame(symbol):
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="1d", interval="1m")
-        if df.empty or len(df) < 40:
+        # WEEKEND PROTECTION: If market is closed or data is thin, pass what's available
+        if df.empty or len(df) < 5:
             return None
             
         df = df.reset_index()
@@ -38,6 +39,9 @@ def get_market_data_frame(symbol):
 
 def process_strategy_logic(df):
     """Executes your multi-layered strategy matrix rules."""
+    if df is None or len(df) < 40:
+        return "❌ MARKET CLOSED (Weekend Pause)", "N/A", "N/A"
+
     close_prices = df['close']
     high_prices = df['high']
     low_prices = df['low']
@@ -95,15 +99,19 @@ def send_telegram_matrix(btc_data, gold_data):
     url = f"https://telegram.org{TOKEN}/sendMessage"
     current_time = datetime.now().strftime('%H:%M')
 
+    # Formatting displays for closed vs open data streams
+    btc_price_display = f"${btc_data['price']:,.2f} USD" if btc_data['price'] else "Fetching..."
+    gold_price_display = f"${gold_data['price']:,.2f} USD / oz" if gold_data['price'] else "Closed (Weekend)"
+
     market_message = (
         f"📊 *1-MINUTE MARKET UPDATE MATRIX*\n\n"
         f"🌑 *BITCOIN (BTC) Profile*\n"
-        f"💰 Price: ${btc_data['price']:,.2f} USD\n"
+        f"💰 Price: {btc_price_display}\n"
         f"🌀 Signal: {btc_data['signal']}\n"
         f"🛑 SL: {btc_data['sl']}  |  🎯 TP: {btc_data['tp']}\n"
         f"-----------------------------------\n\n"
         f"✨ *GOLD (XAUUSD) Profile*\n"
-        f"💰 Price: ${gold_data['price']:,.2f} USD / oz\n"
+        f"💰 Price: {gold_price_display}\n"
         f"🌀 Signal: {gold_data['signal']}\n"
         f"🛑 SL: {gold_data['sl']}  |  🎯 TP: {gold_data['tp']}\n\n"
         f"⏰ Matrix Time: {current_time} | Timeframe: 1m"
@@ -116,39 +124,32 @@ def send_telegram_matrix(btc_data, gold_data):
     except Exception as e:
         print(f"Telegram API transmission drop: {e}")
 
-def self_awake_ping_loop():
-    """BACKGROUND CORE THREAD: Keeps Render/Cloud server active."""
-    while True:
-        try:
-            requests.get("https://telegram.org", timeout=5)
-        except Exception:
-            pass
-        time.sleep(600)
-
 def market_analysis_execution():
     """Main checking engine running tightly every 60 seconds."""
     while True:
         df_btc = get_market_data_frame("BTC-USD")
         df_gold = get_market_data_frame("GC=F")
         
-        if df_btc is not None and df_gold is not None:
-            btc_price = float(df_btc['close'].iloc[-1])
-            btc_sig, btc_sl, btc_tp = process_strategy_logic(df_btc)
+        # Initialize default safe payload maps
+        btc_package = {"price": None, "signal": "Awaiting Data", "sl": "N/A", "tp": "N/A"}
+        gold_package = {"price": None, "signal": "❌ MARKET CLOSED (Weekend Pause)", "sl": "N/A", "tp": "N/A"}
+
+        # Process BTC data (Crypto runs 24/7)
+        if df_btc is not None and not df_btc.empty:
+            btc_package["price"] = float(df_btc['close'].iloc[-1])
+            btc_package["signal"], btc_package["sl"], btc_package["tp"] = process_strategy_logic(df_btc)
             
-            gold_price = float(df_gold['close'].iloc[-1])
-            gold_sig, gold_sl, gold_tp = process_strategy_logic(df_gold)
+        # Process Gold data (Commodities pause on weekends)
+        if df_gold is not None and not df_gold.empty and len(df_gold) >= 40:
+            gold_package["price"] = float(df_gold['close'].iloc[-1])
+            gold_package["signal"], gold_package["sl"], gold_package["tp"] = process_strategy_logic(df_gold)
             
-            btc_package = {"price": btc_price, "signal": btc_sig, "sl": btc_sl, "tp": btc_tp}
-            gold_package = {"price": gold_price, "signal": gold_sig, "sl": gold_sl, "tp": gold_tp}
-            
+        # Send matrix as long as at least one active profile exists
+        if df_btc is not None:
             send_telegram_matrix(btc_package, gold_package)
                 
         time.sleep(60)
 
 if __name__ == "__main__":
     print("1-Minute Strategy Matrix ready with automated port bindings.")
-    
-    awake_worker = threading.Thread(target=self_awake_ping_loop, daemon=True)
-    awake_worker.start()
-    
     market_analysis_execution()
