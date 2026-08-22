@@ -18,12 +18,12 @@ API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# Separate endpoints for Bitcoin and Gold (Tether Gold XAUT)
+# Explicit live data URLs for Binance API
 BTC_URL  = "https://binance.com"
 GOLD_URL = "https://binance.com"
 
 def fetch_asset_data(url):
-    """Fetches real-time 1-minute candlestick arrays for a specific URL endpoint."""
+    """Fetches raw market candles safely."""
     try:
         response = requests.get(url, headers=API_HEADERS, timeout=5)
         if response.status_code == 200:
@@ -33,33 +33,40 @@ def fetch_asset_data(url):
     return None
 
 def process_strategy(raw_candles, asset_name, asset_emoji):
-    """Processes your 1-minute strategy math for a single asset with correct index unpacking."""
+    """Processes your strategy using named variable loops to bypass text-drop bugs."""
     if not raw_candles or len(raw_candles) < 10:
         return f"{asset_emoji} **{asset_name}:** Data stream unavailable..."
 
-    idx_curr = len(raw_candles) - 2  # Last completed closed candle
-    idx_prev = len(raw_candles) - 3  # Previous closed candle
-
     try:
-        # FIXED: Explicitly added list indices to extract numerical parameters
-        open_p  = float(raw_candles[idx_curr][1])  # Index 1 is Open Price
-        high_p  = float(raw_candles[idx_curr][2])  # Index 2 is High Price
-        low_p   = float(raw_candles[idx_curr][3])  # Index 3 is Low Price
-        close_p = float(raw_candles[idx_curr][4])  # Index 4 is Close Price
+        # 1. Map out the candle rows safely using clear Python iterator functions
+        current_candle_row = list(raw_candles[-2]) # Last fully completed 1m candle
+        prev_candle_row = list(raw_candles[-3])    # Previous completed 1m candle
 
-        prev_close = float(raw_candles[idx_prev][4])  # Index 4 is Close Price
+        # 2. Extract price metrics by popping positions cleanly without text brackets
+        current_candle_row.pop(0) # Drops timestamp profile
+        open_p  = float(current_candle_row.pop(0))
+        high_p  = float(current_candle_row.pop(0))
+        low_p   = float(current_candle_row.pop(0))
+        close_p = float(current_candle_row.pop(0))
 
-        # 1. 3-Period Simple Moving Average (SMA) Math using Close positions
-        c_0 = float(raw_candles[len(raw_candles)-2][4])
-        c_1 = float(raw_candles[len(raw_candles)-3][4])
-        c_2 = float(raw_candles[len(raw_candles)-4][4])
-        sma_3 = (c_0 + c_1 + c_2) / 3
+        prev_candle_row.pop(0) # Drops timestamp profile
+        prev_candle_row.pop(0) # Drops open price
+        prev_candle_row.pop(0) # Drops high price
+        prev_candle_row.pop(0) # Drops low price
+        prev_close = float(prev_candle_row.pop(0))
 
-        # 2. Trend Logic Check
+        # 3. Simple Moving Average Math (3-Period SMA)
+        close_prices = []
+        for candle in raw_candles[-4:-1]:
+            candle_data = list(candle)
+            close_prices.append(float(candle_data[4]))
+        sma_3 = sum(close_prices) / 3
+
+        # 4. Apply Trend Activation Rules
         is_bullish_trend = close_p > sma_3 and close_p > prev_close
         is_bearish_trend = close_p < sma_3 and close_p < prev_close
 
-        # 3. Candlestick Structure Tracking
+        # 5. Calculate Candlestick Body Structure Metrics
         candle_range = (high_p - low_p) if (high_p - low_p) > 0 else 0.0001
         candle_body  = abs(close_p - open_p)
         upper_wick   = high_p - max(open_p, close_p)
@@ -75,13 +82,18 @@ def process_strategy(raw_candles, asset_name, asset_emoji):
         else:
             candle_style = "Neutral / Doji ⏳"
 
-        # 4. Support/Resistance Swing Channels for Stop Loss
-        recent_lows = [float(candle[3]) for candle in raw_candles[-6:-1]]   # Index 3 is Low Price
-        recent_highs = [float(candle[2]) for candle in raw_candles[-6:-1]]  # Index 2 is High Price
-        local_swing_low = min(recent_lows)
-        local_swing_high = max(recent_highs)
+        # 6. Extract dynamic swing positions for clean Stop Loss tags
+        low_prices_pool = []
+        high_prices_pool = []
+        for candle in raw_candles[-6:-1]:
+            candle_data = list(candle)
+            low_prices_pool.append(float(candle_data[3]))
+            high_prices_pool.append(float(candle_data[2]))
+            
+        local_swing_low = min(low_prices_pool)
+        local_swing_high = max(high_prices_pool)
 
-        # 5. Compile Separate Dynamic Signal Tags
+        # 7. Classify Strategy Direction Outcomes
         if is_bullish_trend:
             signal_text = "🟢 BUY ACTIVE"
             risk_text = f"🛡️ Stop Loss: ${local_swing_low:,.2f}"
@@ -92,7 +104,6 @@ def process_strategy(raw_candles, asset_name, asset_emoji):
             signal_text = "⚪ NEUTRAL SCAN"
             risk_text = "🛡️ Stop Loss: No active setup"
 
-        # Return formatted block for this specific asset
         return (
             f"{asset_emoji} **{asset_name} Profile**\n"
             f"💰 Price: ${close_p:,.2f} USD\n"
@@ -110,11 +121,9 @@ def analyze_and_trade_dual():
     btc_candles = fetch_asset_data(BTC_URL)
     gold_candles = fetch_asset_data(GOLD_URL)
 
-    # Process each asset independently with clear distinguishing labels
     btc_report  = process_strategy(btc_candles, "BITCOIN (BTC)", "🪙")
     gold_report = process_strategy(gold_candles, "GOLD (XAUT)", "✨")
 
-    # Combine both individual profiles into a single easy-to-read message payload
     combined_summary = (
         f"📊 **1-MINUTE MARKET UPDATE MATRIX**\n\n"
         f"{btc_report}\n"
@@ -161,7 +170,6 @@ async def trading_loop():
         except Exception as e:
             print(f"Telegram Send Error: {e}")
 
-        # Sleep for exactly 1 minute (60 seconds)
         await asyncio.sleep(60)
 
 @app.on_event("startup")
