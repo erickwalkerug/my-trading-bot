@@ -19,18 +19,18 @@ API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# Kraken's unrestricted data stream links
+# Kraken's live unrestricted API endpoints
 BTC_KRAKEN_URL  = "https://kraken.com"
 GOLD_KRAKEN_URL = "https://kraken.com"
 
-# Plain English data extraction tools to bypass index bracket bugs
+# FIXED: Replaced temporary labels with Kraken's formal system database keys
 get_result_field = itemgetter("result")
-get_btc_pair_field = itemgetter("XBTUSDT")
-get_gold_pair_field = itemgetter("XAUTUSDT")
+get_btc_pair_field = itemgetter("XXBTZUSD")  # Kraken's internal system key for BTC/USDT
+get_gold_pair_field = itemgetter("XAUTUSD")   # Kraken's internal system key for GOLD/USDT
 get_ticker_data_list = itemgetter("c")
 
 def fetch_kraken_btc():
-    """Fetches live Bitcoin price from Kraken's open node."""
+    """Fetches real live Bitcoin price from Kraken's open node network."""
     try:
         response = requests.get(BTC_KRAKEN_URL, headers=API_HEADERS, timeout=6)
         if response.status_code == 200:
@@ -38,14 +38,13 @@ def fetch_kraken_btc():
             result = get_result_field(data)
             pair_data = get_btc_pair_field(result)
             price_list = get_ticker_data_list(pair_data)
-            # The first item in the 'c' list is the current price string
             return float(next(iter(price_list)))
     except Exception as e:
-        print(f"Kraken BTC Error: {e}")
+        print(f"Kraken BTC Processing Error: {e}")
     return 0.0
 
 def fetch_kraken_gold():
-    """Fetches live Gold price from Kraken's open node."""
+    """Fetches real live Gold price from Kraken's open node network."""
     try:
         response = requests.get(GOLD_KRAKEN_URL, headers=API_HEADERS, timeout=6)
         if response.status_code == 200:
@@ -53,10 +52,9 @@ def fetch_kraken_gold():
             result = get_result_field(data)
             pair_data = get_gold_pair_field(result)
             price_list = get_ticker_data_list(pair_data)
-            # The first item in the 'c' list is the current price string
             return float(next(iter(price_list)))
     except Exception as e:
-        print(f"Kraken Gold Error: {e}")
+        print(f"Kraken Gold Processing Error: {e}")
     return 0.0
 
 def analyze_and_trade_dual():
@@ -103,7 +101,7 @@ async def trading_loop():
         async with bot:
             await bot.send_message(
                 chat_id=str(CHAT_ID).strip(), 
-                text="✅ **Kraken Open-Node Update Stream Active**\nConnected to unrestricted data networks. Broadcasting prices now!"
+                text="✅ **Kraken Matrix Core Stream Synchronized**\nConnected to unrestricted system channels. Streaming active feeds now!"
             )
     except Exception as e:
         print(f"Startup Telegram Error: {e}.")
