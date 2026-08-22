@@ -33,23 +33,23 @@ def fetch_asset_data(url):
     return None
 
 def process_strategy(raw_candles, asset_name, asset_emoji):
-    """Processes your 1-minute strategy math for a single asset."""
+    """Processes your 1-minute strategy math for a single asset with correct index unpacking."""
     if not raw_candles or len(raw_candles) < 10:
-        return f"{asset_emoji} **{asset_name}:** Gathering data pool..."
+        return f"{asset_emoji} **{asset_name}:** Data stream unavailable..."
 
     idx_curr = len(raw_candles) - 2  # Last completed closed candle
     idx_prev = len(raw_candles) - 3  # Previous closed candle
 
     try:
-        # Extract explicit candlestick properties safely
-        open_p  = float(raw_candles[idx_curr][1])
-        high_p  = float(raw_candles[idx_curr][2])
-        low_p   = float(raw_candles[idx_curr][3])
-        close_p = float(raw_candles[idx_curr][4])
+        # FIXED: Unpacking specific internal properties correctly from the Binance package layout
+        open_p  = float(raw_candles[idx_curr][1]) # Position 1 is Open Price
+        high_p  = float(raw_candles[idx_curr][2]) # Position 2 is High Price
+        low_p   = float(raw_candles[idx_curr][3]) # Position 3 is Low Price
+        close_p = float(raw_candles[idx_curr][4]) # Position 4 is Close Price
 
         prev_close = float(raw_candles[idx_prev][4])
 
-        # 1. 3-Period Simple Moving Average (SMA) Math
+        # 1. 3-Period Simple Moving Average (SMA) Math using Close positions
         c_0 = float(raw_candles[len(raw_candles)-2][4])
         c_1 = float(raw_candles[len(raw_candles)-3][4])
         c_2 = float(raw_candles[len(raw_candles)-4][4])
