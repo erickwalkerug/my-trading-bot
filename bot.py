@@ -41,13 +41,13 @@ def process_strategy(raw_candles, asset_name, asset_emoji):
     idx_prev = len(raw_candles) - 3  # Previous closed candle
 
     try:
-        # FIXED: Extract explicit internal list positions from the Binance package layout
-        open_p  = float(raw_candles[idx_curr][1]) # Position 1 is Open Price
-        high_p  = float(raw_candles[idx_curr][2]) # Position 2 is High Price
-        low_p   = float(raw_candles[idx_curr][3]) # Position 3 is Low Price
-        close_p = float(raw_candles[idx_curr][4]) # Position 4 is Close Price
+        # FIXED: Explicitly added list indices to extract numerical parameters
+        open_p  = float(raw_candles[idx_curr][1])  # Index 1 is Open Price
+        high_p  = float(raw_candles[idx_curr][2])  # Index 2 is High Price
+        low_p   = float(raw_candles[idx_curr][3])  # Index 3 is Low Price
+        close_p = float(raw_candles[idx_curr][4])  # Index 4 is Close Price
 
-        prev_close = float(raw_candles[idx_prev][4]) # Position 4 is Close Price
+        prev_close = float(raw_candles[idx_prev][4])  # Index 4 is Close Price
 
         # 1. 3-Period Simple Moving Average (SMA) Math using Close positions
         c_0 = float(raw_candles[len(raw_candles)-2][4])
@@ -75,9 +75,9 @@ def process_strategy(raw_candles, asset_name, asset_emoji):
         else:
             candle_style = "Neutral / Doji ⏳"
 
-        # 4. Support/Resistance Swing Channels for Stop Loss (pulls from Low position [3] and High position)
-        recent_lows = [float(candle[3]) for candle in raw_candles[-6:-1]]
-        recent_highs = [float(candle[2]) for candle in raw_candles[-6:-1]]
+        # 4. Support/Resistance Swing Channels for Stop Loss
+        recent_lows = [float(candle[3]) for candle in raw_candles[-6:-1]]   # Index 3 is Low Price
+        recent_highs = [float(candle[2]) for candle in raw_candles[-6:-1]]  # Index 2 is High Price
         local_swing_low = min(recent_lows)
         local_swing_high = max(recent_highs)
 
