@@ -5,6 +5,7 @@ import uvicorn
 from telegram import Bot
 from telegram.request import HTTPXRequest
 import asyncio
+from operator import itemgetter
 
 app = FastAPI()
 
@@ -18,42 +19,54 @@ API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# Open, unrestricted alternative endpoints that accept shared hosting platforms
-BTC_PUBLIC_URL  = "https://coindesk.com"
-GOLD_PUBLIC_URL = "https://binance.us"
+# Kraken's unrestricted data stream links
+BTC_KRAKEN_URL  = "https://kraken.com"
+GOLD_KRAKEN_URL = "https://kraken.com"
 
-def fetch_btc_price():
-    """Fetches real-time price from the public CoinDesk index node."""
+# Plain English data extraction tools to bypass index bracket bugs
+get_result_field = itemgetter("result")
+get_btc_pair_field = itemgetter("XBTUSDT")
+get_gold_pair_field = itemgetter("XAUTUSDT")
+get_ticker_data_list = itemgetter("c")
+
+def fetch_kraken_btc():
+    """Fetches live Bitcoin price from Kraken's open node."""
     try:
-        response = requests.get(BTC_PUBLIC_URL, headers=API_HEADERS, timeout=6)
+        response = requests.get(BTC_KRAKEN_URL, headers=API_HEADERS, timeout=6)
         if response.status_code == 200:
             data = response.json()
-            return float(data.get("bpi", {}).get("USD", {}).get("rate_float", 0.0))
+            result = get_result_field(data)
+            pair_data = get_btc_pair_field(result)
+            price_list = get_ticker_data_list(pair_data)
+            # The first item in the 'c' list is the current price string
+            return float(next(iter(price_list)))
     except Exception as e:
-        print(f"BTC Fetch Error: {e}")
+        print(f"Kraken BTC Error: {e}")
     return 0.0
 
-def fetch_gold_price():
-    """Fetches real-time price from the open Binance US endpoint."""
+def fetch_kraken_gold():
+    """Fetches live Gold price from Kraken's open node."""
     try:
-        response = requests.get(GOLD_PUBLIC_URL, headers=API_HEADERS, timeout=6)
+        response = requests.get(GOLD_KRAKEN_URL, headers=API_HEADERS, timeout=6)
         if response.status_code == 200:
             data = response.json()
-            return float(data.get("price", 0.0))
+            result = get_result_field(data)
+            pair_data = get_gold_pair_field(result)
+            price_list = get_ticker_data_list(pair_data)
+            # The first item in the 'c' list is the current price string
+            return float(next(iter(price_list)))
     except Exception as e:
-        print(f"Gold Fetch Error: {e}")
+        print(f"Kraken Gold Error: {e}")
     return 0.0
 
 def analyze_and_trade_dual():
-    """Compiles market pricing details and maps signal placeholders."""
-    btc_price = fetch_btc_price()
-    gold_price = fetch_gold_price()
+    """Compiles market pricing details securely using Kraken data feeds."""
+    btc_price = fetch_kraken_btc()
+    gold_price = fetch_kraken_gold()
 
-    # Fallback message format handling if a stream node stalls out temporarily
     btc_display = f"${btc_price:,.2f} USD" if btc_price > 0 else "⚠️ Data node busy"
     gold_display = f"${gold_price:,.2f} USD / oz" if gold_price > 0 else "⚠️ Data node busy"
 
-    # Assign clean strategy signals based on general active targets
     btc_signal = "🟢 BUY ACTIVE (Momentum Target Open)" if btc_price > 0 else "⏳ Scanning..."
     gold_signal = "🟢 BUY ACTIVE (Momentum Target Open)" if gold_price > 0 else "⏳ Scanning..."
 
@@ -71,7 +84,7 @@ def analyze_and_trade_dual():
 
 @app.get("/")
 def home():
-    return {"status": "unrestricted_dual_bot_running", "system": "active"}
+    return {"status": "kraken_dual_bot_running", "system": "active"}
 
 async def keep_awake_loop():
     """Internal loop to keep Render free tier awake."""
@@ -90,7 +103,7 @@ async def trading_loop():
         async with bot:
             await bot.send_message(
                 chat_id=str(CHAT_ID).strip(), 
-                text="✅ **Public Open-Node Update Stream Active**\nConnected to unrestricted data networks. Broadcasting prices now!"
+                text="✅ **Kraken Open-Node Update Stream Active**\nConnected to unrestricted data networks. Broadcasting prices now!"
             )
     except Exception as e:
         print(f"Startup Telegram Error: {e}.")
