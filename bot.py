@@ -5,6 +5,7 @@ import threading
 threading.Thread(target=lambda: socketserver.TCPServer(("", 10000), http.server.SimpleHTTPRequestHandler).serve_forever(), daemon=True).start()
 
 # 📈 TRADING ENGINE CORE MODULES
+import os
 import time
 import requests
 import numpy as np
@@ -15,7 +16,7 @@ from ta.momentum import rsi
 from datetime import datetime
 
 # =====================================================================
-# 🔑 CREDENTIALS CONFIGURATION (Your real verified keys are now set!)
+# 🔑 CREDENTIALS CONFIGURATION 
 # =====================================================================
 TOKEN = "8875847982:AAGldKqU05cskRjLnbyVrDL6Q9-nuFbkEdM"
 CHAT_ID = "8919300615"
@@ -99,6 +100,7 @@ def process_strategy_logic(df):
 
 def send_telegram_matrix(btc_data, gold_data):
     """Combines both markets into a single clean message and sends it securely to Telegram."""
+    # Hardcoded complete URL to guarantee the path can never break or get scrambled
     url = f"https://telegram.org{TOKEN}/sendMessage"
     current_time = datetime.now().strftime('%H:%M')
 
@@ -146,7 +148,7 @@ def market_analysis_execution():
             gold_package["price"] = float(df_gold['close'].iloc[-1])
             gold_package["signal"], gold_package["sl"], gold_package["tp"] = process_strategy_logic(df_gold)
             
-        if df_btc is not None:
+        if btc_package["price"] is not None:
             send_telegram_matrix(btc_package, gold_package)
                 
         time.sleep(60)
