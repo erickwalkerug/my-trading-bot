@@ -14,9 +14,12 @@ from ta.trend import ema_indicator, macd, macd_signal
 from ta.momentum import rsi
 from datetime import datetime
 
-# 🔑 HARDWARE KEY CONFIGURATION
-TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-CHAT_ID = "YOUR_PERSONAL_CHAT_ID"
+# =====================================================================
+# 🔑 CREDENTIALS CONFIGURATION (Your real verified keys are now set!)
+# =====================================================================
+TOKEN = "8875847982:AAGldKqU05cskRjLnbyVrDL6Q9-nuFbkEdM"
+CHAT_ID = "8919300615"
+# =====================================================================
 
 # 📊 RISK TO REWARD RATIO CONFIGURATION
 RISK_REWARD_RATIO = 2.0  # 1:2 Ratio. (TP will be 2x the distance of your SL)
@@ -95,11 +98,10 @@ def process_strategy_logic(df):
         return f"🟡 HOLD ACTIVE ({trend_status})", "N/A", "N/A"
 
 def send_telegram_matrix(btc_data, gold_data):
-    """Combines both markets into a single clean message and sends it every minute."""
+    """Combines both markets into a single clean message and sends it securely to Telegram."""
     url = f"https://telegram.org{TOKEN}/sendMessage"
     current_time = datetime.now().strftime('%H:%M')
 
-    # Formatting displays for closed vs open data streams
     btc_price_display = f"${btc_data['price']:,.2f} USD" if btc_data['price'] else "Fetching..."
     gold_price_display = f"${gold_data['price']:,.2f} USD / oz" if gold_data['price'] else "Closed (Weekend)"
 
@@ -119,8 +121,11 @@ def send_telegram_matrix(btc_data, gold_data):
     
     payload = {"chat_id": CHAT_ID, "text": market_message, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload, timeout=10)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 1-Minute Matrix broadcast sent.")
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 1-Minute Matrix broadcast delivered successfully.")
+        else:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Telegram rejected with code {response.status_code}: {response.text}")
     except Exception as e:
         print(f"Telegram API transmission drop: {e}")
 
@@ -130,21 +135,17 @@ def market_analysis_execution():
         df_btc = get_market_data_frame("BTC-USD")
         df_gold = get_market_data_frame("GC=F")
         
-        # Initialize default safe payload maps
         btc_package = {"price": None, "signal": "Awaiting Data", "sl": "N/A", "tp": "N/A"}
         gold_package = {"price": None, "signal": "❌ MARKET CLOSED (Weekend Pause)", "sl": "N/A", "tp": "N/A"}
 
-        # Process BTC data (Crypto runs 24/7)
         if df_btc is not None and not df_btc.empty:
             btc_package["price"] = float(df_btc['close'].iloc[-1])
             btc_package["signal"], btc_package["sl"], btc_package["tp"] = process_strategy_logic(df_btc)
             
-        # Process Gold data (Commodities pause on weekends)
         if df_gold is not None and not df_gold.empty and len(df_gold) >= 40:
             gold_package["price"] = float(df_gold['close'].iloc[-1])
             gold_package["signal"], gold_package["sl"], gold_package["tp"] = process_strategy_logic(df_gold)
             
-        # Send matrix as long as at least one active profile exists
         if df_btc is not None:
             send_telegram_matrix(btc_package, gold_package)
                 
