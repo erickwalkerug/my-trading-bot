@@ -66,6 +66,90 @@ def send_telegram(token, chat_id, message):
 
 
 # ============================================================
+# EAST AFRICAN TIME
+# UTC + 3
+# ============================================================
+
+def get_eat_time():
+
+    now_utc = datetime.datetime.now(
+        datetime.timezone.utc
+    )
+
+    now_eat = (
+        now_utc
+        + datetime.timedelta(hours=3)
+    )
+
+    return now_eat
+
+
+# ============================================================
+# TRADING HOURS
+#
+# Signals are allowed:
+# 06:00 AM EAT
+# through
+# 06:00 PM EAT
+#
+# At exactly 18:00, scanning stops.
+# ============================================================
+
+def trading_hours_open():
+
+    now_eat = get_eat_time()
+
+    current_time = now_eat.time()
+
+    start_time = datetime.time(
+        6,
+        0
+    )
+
+    end_time = datetime.time(
+        18,
+        0
+    )
+
+    return (
+        start_time
+        <= current_time
+        < end_time
+    )
+
+
+# ============================================================
+# MARKET SELECTION
+#
+# Monday-Friday:
+# BTC + GOLD
+#
+# Saturday-Sunday:
+# BTC ONLY
+# ============================================================
+
+def get_markets():
+
+    now_eat = get_eat_time()
+
+    weekday = now_eat.weekday()
+
+    # Saturday = 5
+    # Sunday = 6
+
+    if weekday >= 5:
+
+        return {
+            "BTC": "BTC/USD"
+        }
+
+    return {
+        "BTC": "BTC/USD",
+        "GOLD": "XAU/USD"
+    }
+
+
+# ============================================================
 # EMA
 # ============================================================
 
@@ -79,7 +163,9 @@ def calculate_ema(prices, period):
 
     multiplier = 2 / (period + 1)
 
-    ema = sum(prices[:period]) / period
+    ema = sum(
+        prices[:period]
+    ) / period
 
     for price in prices[period:]:
 
@@ -105,7 +191,10 @@ def calculate_rsi(prices, period=14):
 
     for i in range(1, len(prices)):
 
-        change = prices[i] - prices[i - 1]
+        change = (
+            prices[i]
+            - prices[i - 1]
+        )
 
         if change > 0:
 
@@ -117,27 +206,49 @@ def calculate_rsi(prices, period=14):
             gains.append(0)
             losses.append(abs(change))
 
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
+    avg_gain = (
+        sum(gains[:period])
+        / period
+    )
 
-    for i in range(period, len(gains)):
+    avg_loss = (
+        sum(losses[:period])
+        / period
+    )
+
+    for i in range(
+        period,
+        len(gains)
+    ):
 
         avg_gain = (
-            (avg_gain * (period - 1))
+            (
+                avg_gain
+                * (period - 1)
+            )
             + gains[i]
         ) / period
 
         avg_loss = (
-            (avg_loss * (period - 1))
+            (
+                avg_loss
+                * (period - 1)
+            )
             + losses[i]
         ) / period
 
     if avg_loss == 0:
         return 100.0
 
-    rs = avg_gain / avg_loss
+    rs = (
+        avg_gain
+        / avg_loss
+    )
 
-    return 100 - (100 / (1 + rs))
+    return (
+        100
+        - (100 / (1 + rs))
+    )
 
 
 # ============================================================
@@ -152,7 +263,10 @@ def calculate_macd(prices):
 
     macd_values = []
 
-    for i in range(26, len(prices) + 1):
+    for i in range(
+        26,
+        len(prices) + 1
+    ):
 
         window = prices[:i]
 
@@ -173,8 +287,13 @@ def calculate_macd(prices):
     if len(macd_values) < 10:
         return None
 
-    current_macd = macd_values[-1]
-    previous_macd = macd_values[-2]
+    current_macd = (
+        macd_values[-1]
+    )
+
+    previous_macd = (
+        macd_values[-2]
+    )
 
     current_signal = calculate_ema(
         macd_values,
@@ -199,7 +318,10 @@ def calculate_macd(prices):
 # 1-MINUTE MARKET DATA
 # ============================================================
 
-def fetch_1m_candles(symbol, api_key):
+def fetch_1m_candles(
+    symbol,
+    api_key
+):
 
     if not api_key:
 
@@ -390,19 +512,23 @@ def analyze_market(
     previous_low = previous["low"]
 
     higher_high = (
-        current_high > previous_high
+        current_high
+        > previous_high
     )
 
     higher_low = (
-        current_low > previous_low
+        current_low
+        > previous_low
     )
 
     lower_high = (
-        current_high < previous_high
+        current_high
+        < previous_high
     )
 
     lower_low = (
-        current_low < previous_low
+        current_low
+        < previous_low
     )
 
     higher_structure = (
@@ -532,27 +658,24 @@ def analyze_market(
         swing_low = min(
 
             candles[-5]["low"],
-
             candles[-4]["low"],
-
             candles[-3]["low"],
-
             candles[-2]["low"]
         )
 
         stop_loss = swing_low
 
         risk = (
-            entry - stop_loss
+            entry
+            - stop_loss
         )
 
         if risk <= 0:
             return None
 
-        # 2R TAKE PROFIT
-
         take_profit = (
-            entry + (risk * 2)
+            entry
+            + (risk * 2)
         )
 
     else:
@@ -564,27 +687,24 @@ def analyze_market(
         swing_high = max(
 
             candles[-5]["high"],
-
             candles[-4]["high"],
-
             candles[-3]["high"],
-
             candles[-2]["high"]
         )
 
         stop_loss = swing_high
 
         risk = (
-            stop_loss - entry
+            stop_loss
+            - entry
         )
 
         if risk <= 0:
             return None
 
-        # 2R TAKE PROFIT
-
         take_profit = (
-            entry - (risk * 2)
+            entry
+            - (risk * 2)
         )
 
     # ========================================================
@@ -592,7 +712,8 @@ def analyze_market(
     # ========================================================
 
     price_move = (
-        take_profit - entry
+        take_profit
+        - entry
     )
 
     price_move_percent = (
@@ -604,9 +725,6 @@ def analyze_market(
 
     # ========================================================
     # ESTIMATED TRADE DURATION
-    #
-    # Based on recent 1-minute candle ranges.
-    # This is ONLY an estimate.
     # ========================================================
 
     recent_ranges = []
@@ -632,7 +750,8 @@ def analyze_market(
         )
 
         distance_to_tp = abs(
-            take_profit - entry
+            take_profit
+            - entry
         )
 
         estimated_minutes = (
@@ -649,7 +768,8 @@ def analyze_market(
         lower_time = max(
             1,
             int(
-                estimated_minutes * 0.7
+                estimated_minutes
+                * 0.7
             )
         )
 
@@ -658,7 +778,8 @@ def analyze_market(
             lower_time + 1,
 
             int(
-                estimated_minutes * 1.3
+                estimated_minutes
+                * 1.3
             )
         )
 
@@ -701,16 +822,7 @@ def analyze_market(
     # TIME
     # ========================================================
 
-    now_utc = datetime.datetime.now(
-        datetime.timezone.utc
-    )
-
-    now_eat = (
-        now_utc
-        + datetime.timedelta(
-            hours=3
-        )
-    )
+    now_eat = get_eat_time()
 
     timestamp = (
         now_eat.strftime(
@@ -859,12 +971,25 @@ def run_strategy():
     )
 
     print(
-        "📈 Indicators: "
-        "EMA 9 / EMA 26 + RSI + ONE MACD"
+        "🔄 Scan interval: 2 minutes"
     )
 
     print(
-        "💰 Markets: BTC/USD + XAU/USD"
+        "⏰ Trading hours: "
+        "06:00 AM - 06:00 PM EAT"
+    )
+
+    print(
+        "📅 Weekdays: BTC + GOLD"
+    )
+
+    print(
+        "📅 Saturday/Sunday: BTC ONLY"
+    )
+
+    print(
+        "📈 Indicators: "
+        "EMA 9 / EMA 26 + RSI + ONE MACD"
     )
 
     # ========================================================
@@ -884,7 +1009,14 @@ def run_strategy():
 
         "📊 Timeframe: 1 minute\n"
 
-        "💰 Markets: GOLD + BTC\n"
+        "🔄 Scan interval: 2 minutes\n"
+
+        "⏰ Trading hours: "
+        "06:00 AM - 06:00 PM EAT\n"
+
+        "💰 Monday-Friday: GOLD + BTC\n"
+
+        "₿ Saturday-Sunday: BTC ONLY\n"
 
         "📈 EMA 9 / EMA 26\n"
 
@@ -894,12 +1026,8 @@ def run_strategy():
 
         "━━━━━━━━━━━━━━━━━━\n"
 
-        "🔄 Market updates will be "
-        "sent every minute.\n\n"
-
-        "ℹ️ You will receive an update "
-        "even when there is NO "
-        "COMPLETE SETUP."
+        "ℹ️ Gold is disabled on "
+        "Saturday and Sunday."
     )
 
     send_telegram(
@@ -921,14 +1049,55 @@ def run_strategy():
 
         try:
 
-            markets = {
+            now_eat = get_eat_time()
 
-                "BTC":
-                    "BTC/USD",
+            # =================================================
+            # TRADING HOURS CHECK
+            # =================================================
 
-                "GOLD":
-                    "XAU/USD"
-            }
+            if not trading_hours_open():
+
+                print(
+                    f"⏰ Outside trading hours: "
+                    f"{now_eat.strftime('%H:%M:%S')} EAT"
+                )
+
+                # Sleep until the next 2-minute cycle
+                time.sleep(120)
+
+                continue
+
+            # =================================================
+            # GET MARKETS
+            # =================================================
+
+            markets = get_markets()
+
+            day_name = now_eat.strftime(
+                "%A"
+            )
+
+            print(
+                f"📅 {day_name} | "
+                f"{now_eat.strftime('%H:%M:%S')} EAT"
+            )
+
+            if day_name in [
+                "Saturday",
+                "Sunday"
+            ]:
+
+                print(
+                    "₿ Weekend mode: "
+                    "BTC ONLY"
+                )
+
+            else:
+
+                print(
+                    "📊 Weekday mode: "
+                    "BTC + GOLD"
+                )
 
             telegram_updates = []
 
@@ -964,7 +1133,6 @@ def run_strategy():
                     telegram_updates.append(
 
                         f"❌ *{asset}*\n"
-
                         f"Market data unavailable."
                     )
 
@@ -1010,7 +1178,6 @@ def run_strategy():
                         f"{asset} SIGNAL!"
                     )
 
-                    # Send signal
                     send_telegram(
 
                         telegram_token,
@@ -1063,33 +1230,21 @@ def run_strategy():
             # CURRENT TIME
             # =================================================
 
-            now_utc = datetime.datetime.now(
-                datetime.timezone.utc
-            )
-
-            now_eat = (
-
-                now_utc
-
-                + datetime.timedelta(
-                    hours=3
-                )
-            )
+            now_eat = get_eat_time()
 
             timestamp = (
-
                 now_eat.strftime(
                     "%Y-%m-%d %H:%M:%S EAT"
                 )
             )
 
             # =================================================
-            # EVERY-MINUTE TELEGRAM UPDATE
+            # EVERY-2-MINUTE TELEGRAM UPDATE
             # =================================================
 
             update_message = (
 
-                "📡 *1-MINUTE "
+                "📡 *2-MINUTE "
                 "MARKET UPDATE*\n"
 
                 "━━━━━━━━━━━━━━━━━━\n"
@@ -1103,10 +1258,9 @@ def run_strategy():
                 f"⏰ {timestamp}\n"
 
                 "🔄 Next update: "
-                "~1 minute"
+                "~2 minutes"
             )
 
-            # ALWAYS SEND UPDATE
             send_telegram(
 
                 telegram_token,
@@ -1122,10 +1276,6 @@ def run_strategy():
                 f"⚠️ Strategy engine "
                 f"error: {e}"
             )
-
-            # =============================================
-            # SEND ERROR TO TELEGRAM
-            # =============================================
 
             error_message = (
 
@@ -1151,7 +1301,7 @@ def run_strategy():
             )
 
         # ====================================================
-        # MAINTAIN APPROXIMATELY 1-MINUTE SCAN INTERVAL
+        # MAINTAIN 2-MINUTE SCAN INTERVAL
         # ====================================================
 
         elapsed = (
@@ -1163,7 +1313,7 @@ def run_strategy():
 
             1,
 
-            60 - elapsed
+            120 - elapsed
         )
 
         print(
