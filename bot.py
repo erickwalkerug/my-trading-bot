@@ -12,30 +12,23 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "<h1>Matrix Strategy Engine (RSI + MACD + Structure) Online!</h1>"
+    return "<h1>Matrix Strategy Engine Online (Anti-Block Enabled)!</h1>"
 
 def keep_web_server_alive():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 def self_awake_loop():
-    """Tricks Render into staying awake by pinging its own URL every 10 minutes."""
-    time.sleep(30)  # Wait for server to boot up completely
+    time.sleep(30)
     render_url = os.environ.get("RENDER_EXTERNAL_URL")
-    
     if not render_url:
-        print("ℹ️ RENDER_EXTERNAL_URL not found in environment. Self-awake engine is paused.")
         return
-
-    print(f"🚀 Self-Awake Engine Active. Target URL: {render_url}")
     while True:
         try:
             requests.get(render_url, timeout=10)
-            print("🔄 Self-Ping Sent: Bot successfully kept awake.")
-        except Exception as e:
-            print(f"⚠️ Self-Ping Warning: {e}")
-        
-        time.sleep(600)  # Runs every 10 minutes
+        except Exception:
+            pass
+        time.sleep(600)
 
 # =====================================================================
 # 2. SECURE TELEGRAM UTILITY (UNCOMPROMISED DIRECT CONNECTION)
@@ -108,38 +101,44 @@ def calculate_macd(prices):
     return current_macd, previous_macd, current_signal, previous_signal
 
 # =====================================================================
-# 4. DATA PIPELINE & CANDLE AGGREGATORS (NO BLOCKS)
+# 4. DATA PIPELINE (UPDATED: ANTI-BLOCKING INFRASTRUCTURE)
 # =====================================================================
-def fetch_1m_candles(asset_type):
+def fetch_1m_candles(asset_type, gecko_key):
     try:
         if asset_type == "BTC":
-            url = "https://binance.com"
-            data = requests.get(url, timeout=10).json()
+            # Switched to Bybit Public Node (Does not block Render cloud server IPs)
+            url = "https://bybit.com"
+            res = requests.get(url, timeout=10).json()
+            raw_candles = res['result']['list']
+            # Bybit list is sorted newest to oldest, reverse it to match math EMA flows
+            raw_candles.reverse()
             return [{
                 'open': float(c[1]), 'high': float(c[2]),
                 'low': float(c[3]), 'close': float(c[4])
-            } for c in data]
+            } for c in raw_candles]
         else:
+            # Uses specialized CoinGecko Developer Key headers to bypass bot blocks
+            headers = {"x-cg-demo-api-key": gecko_key} if gecko_key else {}
             url = "https://coingecko.com"
-            data = requests.get(url, timeout=10).json()
+            data = requests.get(url, headers=headers, timeout=10).json()
             return [{
                 'open': float(c[1]), 'high': float(c[2]),
                 'low': float(c[3]), 'close': float(c[4])
             } for c in data[-50:]]
     except Exception as e:
-        print(f"⚠️ Market Data Stream Error for {asset_type}: {e}")
+        print(f"⚠️ Cloud Data Stream Blocked for {asset_type}: {e}")
         return []
 
 # =====================================================================
 # 5. CORE SIGNAL MATRIX ENGINE (RUNS EVERY 1 MINUTE)
 # =====================================================================
-def run_matrix_strategy(telegram_token, telegram_chat_id):
+def run_matrix_strategy(telegram_token, telegram_chat_id, gecko_key):
     print("🚀 Advanced Multi-Indicator Matrix Activated...")
 
     while True:
         try:
             for asset in ["BTC", "GOLD"]:
-                candles = fetch_1m_candles(asset)
+                candles = fetch_1m_candles(asset, gecko_key)
                 if len(candles) < 30:
                     continue
                 
@@ -149,7 +148,6 @@ def run_matrix_strategy(telegram_token, telegram_chat_id):
                 price_diff = current_price - prev_price
                 price_pct = (price_diff / prev_price) * 100
 
-                # --- TECHNICAL CALCULATIONS ---
                 rsi = calculate_rsi(close_prices, 14)
                 curr_macd, prev_macd, curr_sig, prev_sig = calculate_macd(close_prices)
 
@@ -158,7 +156,6 @@ def run_matrix_strategy(telegram_token, telegram_chat_id):
                 higher_high_low = (h0 > h1) and (l0 > l1)
                 lower_high_low = (h0 < h1) and (l0 < l1)
 
-                # --- EVALUATE STRATEGY MATRIX RULES ---
                 buy_signal = (rsi > 30) and (prev_macd <= prev_sig and curr_macd > curr_sig) and (curr_macd > 0 and curr_sig > 0) and higher_high_low
                 sell_signal = (rsi < 70) and (prev_macd >= prev_sig and curr_macd < curr_sig) and (curr_macd < 0 and curr_sig < 0) and lower_high_low
 
@@ -167,7 +164,6 @@ def run_matrix_strategy(telegram_token, telegram_chat_id):
                     move_arrow = "↗️" if price_diff >= 0 else "↘️"
                     multiplier = 1 if buy_signal else -1
                     
-                    # Risk Spread Multipliers
                     tp_spread = 0.015 if asset == "BTC" else 0.005
                     sl_spread = 0.0075 if asset == "BTC" else 0.0025
                     
@@ -175,7 +171,6 @@ def run_matrix_strategy(telegram_token, telegram_chat_id):
                     sl_price = current_price * (1 - (sl_spread * multiplier))
                     duration = "⏳ 5 - 15 Mins (Fast Scalp)" if asset == "BTC" else "⏳ 3 - 10 Mins (Micro Scalp)"
                     
-                    # Calculate East Africa Time (EAT) by shifting UTC forward 3 hours
                     utc_now = datetime.datetime.utcnow()
                     eat_now = utc_now + datetime.timedelta(hours=3)
                     timestamp = eat_now.strftime("%Y-%m-%d %H:%M:%S EAT")
@@ -210,15 +205,11 @@ def run_matrix_strategy(telegram_token, telegram_chat_id):
 # 6. ORCHESTRATION PIPELINE (PULLING ENVIRONMENT KEYS)
 # =====================================================================
 if __name__ == "__main__":
-    # Extracts tokens directly from your Render environment panel settings
     BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
     CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+    GECKO_KEY = os.environ.get("COINGECKO_API_KEY") # Added for secure authentication
 
-    # Start Thread A: Port listener workaround so Render doesn't shut down
     Thread(target=keep_web_server_alive, daemon=True).start()
-
-    # Start Thread B: Self-Awake ping engine to stop Render from sleeping
     Thread(target=self_awake_loop, daemon=True).start()
 
-    # Start Core Matrix Strategy Process
-    run_matrix_strategy(BOT_TOKEN, CHAT_ID)
+    run_matrix_strategy(BOT_TOKEN, CHAT_ID, GECKO_KEY)
