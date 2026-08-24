@@ -6,6 +6,24 @@ from flask import Flask
 import requests
 
 # ============================================================
+# MATRIX STRATEGY ENGINE
+# EARLY ENTRY VERSION
+#
+# TIMEFRAME: 1 MINUTE
+# SCAN: EVERY 2 MINUTES
+#
+# INDICATORS:
+# EMA 9 / EMA 26
+# RSI 14
+# ONE MACD 12 / 26 / 9
+#
+# SIGNALS:
+# Sends every qualifying setup.
+# Signal strength = strategy alignment score, NOT win probability.
+# ============================================================
+
+
+# ============================================================
 # RENDER WEB SERVER
 # ============================================================
 
@@ -19,7 +37,11 @@ def home():
 
 def keep_web_server_alive():
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
 
 
 # ============================================================
@@ -29,10 +51,15 @@ def keep_web_server_alive():
 def send_telegram(token, chat_id, message):
 
     if not token or not chat_id:
+
         print("❌ Telegram credentials missing.")
+
         return False
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{token}/sendMessage"
+    )
 
     payload = {
         "chat_id": chat_id,
@@ -86,13 +113,7 @@ def get_eat_time():
 
 # ============================================================
 # TRADING HOURS
-#
-# Signals are allowed:
-# 06:00 AM EAT
-# through
-# 06:00 PM EAT
-#
-# At exactly 18:00, scanning stops.
+# 06:00 AM - 06:00 PM EAT
 # ============================================================
 
 def trading_hours_open():
@@ -121,10 +142,10 @@ def trading_hours_open():
 # ============================================================
 # MARKET SELECTION
 #
-# Monday-Friday:
+# MONDAY-FRIDAY:
 # BTC + GOLD
 #
-# Saturday-Sunday:
+# SATURDAY-SUNDAY:
 # BTC ONLY
 # ============================================================
 
@@ -133,9 +154,6 @@ def get_markets():
     now_eat = get_eat_time()
 
     weekday = now_eat.weekday()
-
-    # Saturday = 5
-    # Sunday = 6
 
     if weekday >= 5:
 
@@ -156,21 +174,25 @@ def get_markets():
 def calculate_ema(prices, period):
 
     if not prices:
+
         return 0.0
 
     if len(prices) < period:
+
         return sum(prices) / len(prices)
 
     multiplier = 2 / (period + 1)
 
-    ema = sum(
-        prices[:period]
-    ) / period
+    ema = (
+        sum(prices[:period])
+        / period
+    )
 
     for price in prices[period:]:
 
         ema = (
-            (price - ema) * multiplier
+            (price - ema)
+            * multiplier
             + ema
         )
 
@@ -181,15 +203,22 @@ def calculate_ema(prices, period):
 # RSI
 # ============================================================
 
-def calculate_rsi(prices, period=14):
+def calculate_rsi(
+    prices,
+    period=14
+):
 
     if len(prices) < period + 1:
+
         return 50.0
 
     gains = []
     losses = []
 
-    for i in range(1, len(prices)):
+    for i in range(
+        1,
+        len(prices)
+    ):
 
         change = (
             prices[i]
@@ -238,6 +267,7 @@ def calculate_rsi(prices, period=14):
         ) / period
 
     if avg_loss == 0:
+
         return 100.0
 
     rs = (
@@ -252,13 +282,16 @@ def calculate_rsi(prices, period=14):
 
 
 # ============================================================
+# MACD SERIES
+#
 # ONE MACD ONLY
-# MACD = 12 / 26 / 9
+# 12 / 26 / 9
 # ============================================================
 
-def calculate_macd(prices):
+def calculate_macd_series(prices):
 
     if len(prices) < 40:
+
         return None
 
     macd_values = []
@@ -284,7 +317,26 @@ def calculate_macd(prices):
             ema12 - ema26
         )
 
-    if len(macd_values) < 10:
+    if len(macd_values) < 12:
+
+        return None
+
+    signal_values = []
+
+    for i in range(
+        9,
+        len(macd_values) + 1
+    ):
+
+        signal_values.append(
+            calculate_ema(
+                macd_values[:i],
+                9
+            )
+        )
+
+    if not signal_values:
+
         return None
 
     current_macd = (
@@ -295,22 +347,172 @@ def calculate_macd(prices):
         macd_values[-2]
     )
 
-    current_signal = calculate_ema(
-        macd_values,
-        9
+    current_signal = (
+        signal_values[-1]
     )
 
-    previous_signal = calculate_ema(
-        macd_values[:-1],
-        9
+    previous_signal = (
+        signal_values[-2]
     )
 
-    return (
-        current_macd,
-        previous_macd,
-        current_signal,
-        previous_signal
+    return {
+        "macd": current_macd,
+        "previous_macd": previous_macd,
+        "signal": current_signal,
+        "previous_signal": previous_signal,
+        "macd_values": macd_values,
+        "signal_values": signal_values
+    }
+
+
+# ============================================================
+# DETECT RECENT MACD CROSS
+#
+# Allows an early entry shortly after a crossover.
+# ============================================================
+
+def recent_bullish_macd_cross(
+    macd_values,
+    signal_values,
+    lookback=3
+):
+
+    usable = min(
+        lookback,
+        len(macd_values) - 1,
+        len(signal_values) - 1
     )
+
+    if usable <= 0:
+
+        return False
+
+    for i in range(
+        1,
+        usable + 1
+    ):
+
+        current_index = (
+            len(macd_values) - i
+        )
+
+        previous_index = (
+            current_index - 1
+        )
+
+        if previous_index < 0:
+
+            continue
+
+        current_macd = (
+            macd_values[current_index]
+        )
+
+        previous_macd = (
+            macd_values[previous_index]
+        )
+
+        current_signal = (
+            signal_values[
+                min(
+                    current_index
+                    - 8,
+                    len(signal_values) - 1
+                )
+            ]
+        )
+
+        previous_signal = (
+            signal_values[
+                min(
+                    previous_index
+                    - 8,
+                    len(signal_values) - 1
+                )
+            ]
+        )
+
+        if (
+            previous_macd <= previous_signal
+            and
+            current_macd > current_signal
+        ):
+
+            return True
+
+    return False
+
+
+def recent_bearish_macd_cross(
+    macd_values,
+    signal_values,
+    lookback=3
+):
+
+    usable = min(
+        lookback,
+        len(macd_values) - 1,
+        len(signal_values) - 1
+    )
+
+    if usable <= 0:
+
+        return False
+
+    for i in range(
+        1,
+        usable + 1
+    ):
+
+        current_index = (
+            len(macd_values) - i
+        )
+
+        previous_index = (
+            current_index - 1
+        )
+
+        if previous_index < 0:
+
+            continue
+
+        current_macd = (
+            macd_values[current_index]
+        )
+
+        previous_macd = (
+            macd_values[previous_index]
+        )
+
+        current_signal = (
+            signal_values[
+                min(
+                    current_index
+                    - 8,
+                    len(signal_values) - 1
+                )
+            ]
+        )
+
+        previous_signal = (
+            signal_values[
+                min(
+                    previous_index
+                    - 8,
+                    len(signal_values) - 1
+                )
+            ]
+        )
+
+        if (
+            previous_macd >= previous_signal
+            and
+            current_macd < current_signal
+        ):
+
+            return True
+
+    return False
 
 
 # ============================================================
@@ -438,7 +640,50 @@ last_signal = {}
 
 
 # ============================================================
+# SIGNAL INTERPRETATION
+# ============================================================
+
+def get_strength_interpretation(
+    score
+):
+
+    if score >= 90:
+
+        return (
+            "🔥 VERY STRONG ALIGNMENT — "
+            "multiple momentum and trend conditions agree."
+        )
+
+    if score >= 80:
+
+        return (
+            "🟢 STRONG ALIGNMENT — "
+            "trend, momentum and entry conditions are strongly aligned."
+        )
+
+    if score >= 70:
+
+        return (
+            "🟡 GOOD ALIGNMENT — "
+            "early setup with several confirming conditions."
+        )
+
+    if score >= 60:
+
+        return (
+            "🔵 EARLY SETUP — "
+            "momentum is developing, but confirmation is weaker."
+        )
+
+    return (
+        "⚪ DEVELOPING SETUP — "
+        "early directional evidence is present."
+    )
+
+
+# ============================================================
 # STRATEGY
+# EARLY ENTRY SCORING ENGINE
 # ============================================================
 
 def analyze_market(
@@ -448,6 +693,7 @@ def analyze_market(
 ):
 
     if len(candles) < 40:
+
         return None
 
     closes = [
@@ -457,8 +703,15 @@ def analyze_market(
 
     current = candles[-1]
     previous = candles[-2]
+    previous2 = candles[-3]
 
-    current_price = current["close"]
+    current_price = (
+        current["close"]
+    )
+
+    previous_price = (
+        previous["close"]
+    )
 
     # ========================================================
     # EMA 9 / EMA 26
@@ -474,6 +727,16 @@ def analyze_market(
         26
     )
 
+    previous_ema9 = calculate_ema(
+        closes[:-1],
+        9
+    )
+
+    previous_ema26 = calculate_ema(
+        closes[:-1],
+        26
+    )
+
     # ========================================================
     # RSI
     # ========================================================
@@ -483,66 +746,41 @@ def analyze_market(
         14
     )
 
+    previous_rsi = calculate_rsi(
+        closes[:-1],
+        14
+    )
+
     # ========================================================
-    # ONE MACD
+    # MACD
     # ========================================================
 
-    macd = calculate_macd(
+    macd_data = calculate_macd_series(
         closes
     )
 
-    if macd is None:
+    if macd_data is None:
+
         return None
 
-    (
-        curr_macd,
-        prev_macd,
-        curr_signal,
-        prev_signal
-    ) = macd
+    curr_macd = macd_data["macd"]
 
-    # ========================================================
-    # CANDLE STRUCTURE
-    # ========================================================
+    prev_macd = macd_data["previous_macd"]
 
-    current_high = current["high"]
-    previous_high = previous["high"]
+    curr_signal = macd_data["signal"]
 
-    current_low = current["low"]
-    previous_low = previous["low"]
+    prev_signal = macd_data["previous_signal"]
 
-    higher_high = (
-        current_high
-        > previous_high
+    macd_values = (
+        macd_data["macd_values"]
     )
 
-    higher_low = (
-        current_low
-        > previous_low
-    )
-
-    lower_high = (
-        current_high
-        < previous_high
-    )
-
-    lower_low = (
-        current_low
-        < previous_low
-    )
-
-    higher_structure = (
-        higher_high
-        and higher_low
-    )
-
-    lower_structure = (
-        lower_high
-        and lower_low
+    signal_values = (
+        macd_data["signal_values"]
     )
 
     # ========================================================
-    # MACD CROSS
+    # MACD CONDITIONS
     # ========================================================
 
     bullish_cross = (
@@ -563,104 +801,451 @@ def analyze_market(
         curr_macd < curr_signal
     )
 
+    recent_bullish_cross = (
+        recent_bullish_macd_cross(
+            macd_values,
+            signal_values,
+            3
+        )
+    )
+
+    recent_bearish_cross = (
+        recent_bearish_macd_cross(
+            macd_values,
+            signal_values,
+            3
+        )
+    )
+
+    bullish_macd = (
+        curr_macd > curr_signal
+    )
+
+    bearish_macd = (
+        curr_macd < curr_signal
+    )
+
+    macd_rising = (
+        curr_macd > prev_macd
+    )
+
+    macd_falling = (
+        curr_macd < prev_macd
+    )
+
     # ========================================================
-    # DIRECTION
+    # PRICE MOMENTUM
     # ========================================================
 
-    bullish_direction = (
+    bullish_candle = (
+        current["close"]
+        > current["open"]
+    )
 
+    bearish_candle = (
+        current["close"]
+        < current["open"]
+    )
+
+    recent_price_rising = (
+        current_price
+        > previous_price
+        > previous2["close"]
+    )
+
+    recent_price_falling = (
+        current_price
+        < previous_price
+        < previous2["close"]
+    )
+
+    # ========================================================
+    # CANDLE STRUCTURE
+    # ========================================================
+
+    higher_high = (
+        current["high"]
+        > previous["high"]
+    )
+
+    higher_low = (
+        current["low"]
+        > previous["low"]
+    )
+
+    lower_high = (
+        current["high"]
+        < previous["high"]
+    )
+
+    lower_low = (
+        current["low"]
+        < previous["low"]
+    )
+
+    higher_structure = (
+        higher_high
+        and higher_low
+    )
+
+    lower_structure = (
+        lower_high
+        and lower_low
+    )
+
+    # ========================================================
+    # EMA DIRECTION
+    # ========================================================
+
+    ema_bullish = (
         ema9 > ema26
+    )
+
+    ema_bearish = (
+        ema9 < ema26
+    )
+
+    ema_bullish_crossing = (
+
+        previous_ema9
+        <= previous_ema26
 
         and
 
+        ema9 > ema26
+    )
+
+    ema_bearish_crossing = (
+
+        previous_ema9
+        >= previous_ema26
+
+        and
+
+        ema9 < ema26
+    )
+
+    price_above_ema9 = (
         current_price > ema9
     )
 
-    bearish_direction = (
-
-        ema9 < ema26
-
-        and
-
+    price_below_ema9 = (
         current_price < ema9
     )
 
     # ========================================================
+    # RSI DIRECTION
+    # ========================================================
+
+    rsi_rising = (
+        rsi > previous_rsi
+    )
+
+    rsi_falling = (
+        rsi < previous_rsi
+    )
+
+    # Avoid buying an extremely overextended RSI.
+    buy_rsi_zone = (
+        30 < rsi < 75
+    )
+
+    sell_rsi_zone = (
+        25 < rsi < 70
+    )
+
+    # ========================================================
+    # EARLY BUY SCORE
+    # ========================================================
+
+    buy_score = 0
+
+    buy_reasons = []
+
+    # EMA trend/alignment
+    if ema_bullish:
+
+        buy_score += 15
+
+        buy_reasons.append(
+            "EMA9 > EMA26"
+        )
+
+    if price_above_ema9:
+
+        buy_score += 10
+
+        buy_reasons.append(
+            "Price above EMA9"
+        )
+
+    if ema_bullish_crossing:
+
+        buy_score += 8
+
+        buy_reasons.append(
+            "EMA bullish crossover"
+        )
+
+    # MACD
+    if bullish_macd:
+
+        buy_score += 15
+
+        buy_reasons.append(
+            "MACD bullish"
+        )
+
+    if macd_rising:
+
+        buy_score += 10
+
+        buy_reasons.append(
+            "MACD rising"
+        )
+
+    if bullish_cross:
+
+        buy_score += 15
+
+        buy_reasons.append(
+            "Fresh MACD crossover"
+        )
+
+    elif recent_bullish_cross:
+
+        buy_score += 12
+
+        buy_reasons.append(
+            "Recent MACD crossover"
+        )
+
     # RSI
-    #
-    # BUY above 30
-    # SELL below 70
-    # ========================================================
+    if buy_rsi_zone:
 
-    buy_rsi = rsi > 30
+        buy_score += 8
 
-    sell_rsi = rsi < 70
+        buy_reasons.append(
+            "RSI buy zone"
+        )
 
-    # ========================================================
-    # FINAL BUY
-    # ========================================================
+    if rsi_rising:
 
-    buy_signal = (
+        buy_score += 5
 
-        bullish_direction
+        buy_reasons.append(
+            "RSI rising"
+        )
 
-        and
+    # Price momentum
+    if bullish_candle:
 
-        bullish_cross
+        buy_score += 5
 
-        and
+        buy_reasons.append(
+            "Bullish candle"
+        )
 
-        buy_rsi
+    if recent_price_rising:
 
-        and
+        buy_score += 5
 
-        higher_structure
-    )
+        buy_reasons.append(
+            "Short-term price momentum"
+        )
 
-    # ========================================================
-    # FINAL SELL
-    # ========================================================
+    # Structure
+    if higher_structure:
 
-    sell_signal = (
+        buy_score += 4
 
-        bearish_direction
-
-        and
-
-        bearish_cross
-
-        and
-
-        sell_rsi
-
-        and
-
-        lower_structure
-    )
+        buy_reasons.append(
+            "Higher High + Higher Low"
+        )
 
     # ========================================================
-    # NO SIGNAL
+    # EARLY SELL SCORE
     # ========================================================
 
-    if not buy_signal and not sell_signal:
+    sell_score = 0
+
+    sell_reasons = []
+
+    # EMA trend/alignment
+    if ema_bearish:
+
+        sell_score += 15
+
+        sell_reasons.append(
+            "EMA9 < EMA26"
+        )
+
+    if price_below_ema9:
+
+        sell_score += 10
+
+        sell_reasons.append(
+            "Price below EMA9"
+        )
+
+    if ema_bearish_crossing:
+
+        sell_score += 8
+
+        sell_reasons.append(
+            "EMA bearish crossover"
+        )
+
+    # MACD
+    if bearish_macd:
+
+        sell_score += 15
+
+        sell_reasons.append(
+            "MACD bearish"
+        )
+
+    if macd_falling:
+
+        sell_score += 10
+
+        sell_reasons.append(
+            "MACD falling"
+        )
+
+    if bearish_cross:
+
+        sell_score += 15
+
+        sell_reasons.append(
+            "Fresh MACD crossover"
+        )
+
+    elif recent_bearish_cross:
+
+        sell_score += 12
+
+        sell_reasons.append(
+            "Recent MACD crossover"
+        )
+
+    # RSI
+    if sell_rsi_zone:
+
+        sell_score += 8
+
+        sell_reasons.append(
+            "RSI sell zone"
+        )
+
+    if rsi_falling:
+
+        sell_score += 5
+
+        sell_reasons.append(
+            "RSI falling"
+        )
+
+    # Price momentum
+    if bearish_candle:
+
+        sell_score += 5
+
+        sell_reasons.append(
+            "Bearish candle"
+        )
+
+    if recent_price_falling:
+
+        sell_score += 5
+
+        sell_reasons.append(
+            "Short-term price momentum"
+        )
+
+    # Structure
+    if lower_structure:
+
+        sell_score += 4
+
+        sell_reasons.append(
+            "Lower High + Lower Low"
+        )
+
+    # ========================================================
+    # CHOOSE DIRECTION
+    # ========================================================
+
+    if (
+        buy_score >= sell_score
+        and buy_score >= 55
+    ):
+
+        signal_type = "BUY"
+
+        score = min(
+            100,
+            buy_score
+        )
+
+        reasons = buy_reasons
+
+    elif (
+        sell_score > buy_score
+        and sell_score >= 55
+    ):
+
+        signal_type = "SELL"
+
+        score = min(
+            100,
+            sell_score
+        )
+
+        reasons = sell_reasons
+
+    else:
+
         return None
 
     # ========================================================
-    # STOP LOSS + TAKE PROFIT
+    # ADD INTERPRETATION
     # ========================================================
 
-    if buy_signal:
+    interpretation = (
+        get_strength_interpretation(
+            score
+        )
+    )
+
+    # ========================================================
+    # ENTRY
+    # ========================================================
+
+    entry = current_price
+
+    # ========================================================
+    # STOP LOSS
+    #
+    # Use recent swing area.
+    # ========================================================
+
+    recent_lows = [
+        c["low"]
+        for c in candles[-6:-1]
+    ]
+
+    recent_highs = [
+        c["high"]
+        for c in candles[-6:-1]
+    ]
+
+    if signal_type == "BUY":
 
         direction = "🟢 BUY / LONG"
 
-        entry = current_price
-
         swing_low = min(
-
-            candles[-5]["low"],
-            candles[-4]["low"],
-            candles[-3]["low"],
-            candles[-2]["low"]
+            recent_lows
         )
 
         stop_loss = swing_low
@@ -671,6 +1256,7 @@ def analyze_market(
         )
 
         if risk <= 0:
+
             return None
 
         take_profit = (
@@ -682,14 +1268,8 @@ def analyze_market(
 
         direction = "🔴 SELL / SHORT"
 
-        entry = current_price
-
         swing_high = max(
-
-            candles[-5]["high"],
-            candles[-4]["high"],
-            candles[-3]["high"],
-            candles[-2]["high"]
+            recent_highs
         )
 
         stop_loss = swing_high
@@ -700,6 +1280,7 @@ def analyze_market(
         )
 
         if risk <= 0:
+
             return None
 
         take_profit = (
@@ -708,13 +1289,22 @@ def analyze_market(
         )
 
     # ========================================================
-    # EXPECTED MARKET PRICE MOVE
+    # EXPECTED PRICE MOVE
     # ========================================================
 
-    price_move = (
-        take_profit
-        - entry
-    )
+    if signal_type == "BUY":
+
+        price_move = (
+            take_profit
+            - entry
+        )
+
+    else:
+
+        price_move = (
+            entry
+            - take_profit
+        )
 
     price_move_percent = (
 
@@ -755,7 +1345,6 @@ def analyze_market(
         )
 
         estimated_minutes = (
-
             distance_to_tp
             / average_range
         )
@@ -774,9 +1363,7 @@ def analyze_market(
         )
 
         upper_time = max(
-
             lower_time + 1,
-
             int(
                 estimated_minutes
                 * 1.3
@@ -804,9 +1391,13 @@ def analyze_market(
 
     signal_key = (
         f"{asset_name}_"
-        f"{direction}_"
+        f"{signal_type}_"
         f"{candle_id}"
     )
+
+    # ========================================================
+    # DUPLICATE PROTECTION
+    # ========================================================
 
     if last_signal.get(
         asset_name
@@ -831,41 +1422,84 @@ def analyze_market(
     )
 
     # ========================================================
+    # MACD STATUS
+    # ========================================================
+
+    if bullish_cross:
+
+        macd_status = (
+            "🔥 Fresh bullish crossover"
+        )
+
+    elif bearish_cross:
+
+        macd_status = (
+            "🔥 Fresh bearish crossover"
+        )
+
+    elif (
+        signal_type == "BUY"
+        and recent_bullish_cross
+    ):
+
+        macd_status = (
+            "⚡ Recent bullish crossover"
+        )
+
+    elif (
+        signal_type == "SELL"
+        and recent_bearish_cross
+    ):
+
+        macd_status = (
+            "⚡ Recent bearish crossover"
+        )
+
+    elif (
+        signal_type == "BUY"
+        and bullish_macd
+    ):
+
+        macd_status = (
+            "📈 Bullish MACD momentum"
+        )
+
+    elif (
+        signal_type == "SELL"
+        and bearish_macd
+    ):
+
+        macd_status = (
+            "📉 Bearish MACD momentum"
+        )
+
+    else:
+
+        macd_status = (
+            "Developing MACD setup"
+        )
+
+    # ========================================================
     # SIGNAL MESSAGE
     # ========================================================
 
-    move_sign = (
-        "+"
-        if price_move >= 0
-        else ""
-    )
-
-    percent_sign = (
-        "+"
-        if price_move_percent >= 0
-        else ""
-    )
-
-    structure_text = (
-
-        "Higher High + Higher Low"
-
-        if buy_signal
-
-        else
-
-        "Lower High + Lower Low"
-    )
-
     message = (
 
-        f"🤖 *CONFIRMED SIGNAL — "
+        f"🤖 *EARLY ENTRY SIGNAL — "
         f"{asset_name}*\n"
 
         f"━━━━━━━━━━━━━━━━━━\n"
 
         f"📈 *Direction:* "
         f"{direction}\n"
+
+        f"💯 *Signal Strength:* "
+        f"{score}%\n"
+
+        f"🧠 *Interpretation:* "
+        f"{interpretation}\n"
+
+        f"━━━━━━━━━━━━━━━━━━\n"
 
         f"📍 *Market Price:* "
         f"${entry:,.2f}\n"
@@ -877,17 +1511,15 @@ def analyze_market(
         f"${stop_loss:,.2f}\n"
 
         f"📊 *Expected Price Move:* "
-        f"{move_sign}"
         f"${price_move:,.2f} "
-        f"({percent_sign}"
-        f"{price_move_percent:.2f}%)\n"
+        f"({price_move_percent:.2f}%)\n"
 
         f"⏱️ *Estimated Duration:* "
         f"{duration_text}\n"
 
         f"━━━━━━━━━━━━━━━━━━\n"
 
-        f"📊 *1-MIN STRATEGY CHECK*\n"
+        f"📊 *1-MIN EARLY ENTRY CHECK*\n"
 
         f"├ EMA 9: "
         f"${ema9:,.2f}\n"
@@ -904,16 +1536,31 @@ def analyze_market(
         f"├ Signal: "
         f"{curr_signal:.5f}\n"
 
+        f"├ MACD Status: "
+        f"{macd_status}\n"
+
         f"└ Structure: "
-        f"{structure_text}\n"
+        f"{'Higher High + Higher Low' if signal_type == 'BUY' else 'Lower High + Lower Low'}\n"
 
         f"━━━━━━━━━━━━━━━━━━\n"
+
+        f"🔎 *Conditions Detected:*\n"
+
+        + "\n".join(
+            f"• {reason}"
+            for reason in reasons
+        )
+
+        +
+
+        f"\n━━━━━━━━━━━━━━━━━━\n"
 
         f"⏰ *Time:* "
         f"{timestamp}\n"
 
-        f"⚠️ *Signal only — "
-        f"manage risk carefully.*"
+        f"⚠️ *Signal strength is a "
+        f"strategy-alignment score, "
+        f"not a guaranteed win probability.*"
     )
 
     return message
@@ -992,6 +1639,18 @@ def run_strategy():
         "EMA 9 / EMA 26 + RSI + ONE MACD"
     )
 
+    print(
+        "⚡ Early-entry scoring: ENABLED"
+    )
+
+    print(
+        "💯 Signal strength: 0-100%"
+    )
+
+    print(
+        "📡 Qualifying signals: ALL SENT"
+    )
+
     # ========================================================
     # TELEGRAM STARTUP TEST
     # ========================================================
@@ -1022,20 +1681,25 @@ def run_strategy():
 
         "📊 RSI(14)\n"
 
-        "📉 ONE MACD\n"
+        "📉 ONE MACD 12/26/9\n"
+
+        "⚡ Early-entry engine ON\n"
+
+        "💯 Signal-strength scoring ON\n"
+
+        "📡 All qualifying signals "
+        "will be sent.\n"
 
         "━━━━━━━━━━━━━━━━━━\n"
 
-        "ℹ️ Gold is disabled on "
-        "Saturday and Sunday."
+        "ℹ️ Signal strength represents "
+        "strategy alignment, not a "
+        "guaranteed win probability."
     )
 
     send_telegram(
-
         telegram_token,
-
         telegram_chat_id,
-
         startup_message
     )
 
@@ -1052,7 +1716,7 @@ def run_strategy():
             now_eat = get_eat_time()
 
             # =================================================
-            # TRADING HOURS CHECK
+            # TRADING HOURS
             # =================================================
 
             if not trading_hours_open():
@@ -1062,13 +1726,12 @@ def run_strategy():
                     f"{now_eat.strftime('%H:%M:%S')} EAT"
                 )
 
-                # Sleep until the next 2-minute cycle
                 time.sleep(120)
 
                 continue
 
             # =================================================
-            # GET MARKETS
+            # MARKETS
             # =================================================
 
             markets = get_markets()
@@ -1088,15 +1751,13 @@ def run_strategy():
             ]:
 
                 print(
-                    "₿ Weekend mode: "
-                    "BTC ONLY"
+                    "₿ Weekend mode: BTC ONLY"
                 )
 
             else:
 
                 print(
-                    "📊 Weekday mode: "
-                    "BTC + GOLD"
+                    "📊 Weekday mode: BTC + GOLD"
                 )
 
             telegram_updates = []
@@ -1113,9 +1774,7 @@ def run_strategy():
                 )
 
                 candles = fetch_1m_candles(
-
                     symbol,
-
                     twelve_key
                 )
 
@@ -1145,10 +1804,8 @@ def run_strategy():
                 price = candles[-1]["close"]
 
                 print(
-
                     f"💵 {asset}: "
                     f"${price:,.2f} "
-
                     f"| Candles: "
                     f"{len(candles)}"
                 )
@@ -1158,63 +1815,55 @@ def run_strategy():
                 # =============================================
 
                 signal = analyze_market(
-
                     asset,
-
                     symbol,
-
                     candles
                 )
 
                 # =============================================
-                # CONFIRMED SIGNAL
+                # SIGNAL
                 # =============================================
 
                 if signal:
 
                     print(
-
-                        f"🎯 CONFIRMED "
+                        f"🎯 EARLY ENTRY "
                         f"{asset} SIGNAL!"
                     )
 
                     send_telegram(
-
                         telegram_token,
-
                         telegram_chat_id,
-
                         signal
                     )
 
                     telegram_updates.append(
 
                         f"🎯 *{asset}: "
-                        f"SIGNAL CONFIRMED*\n"
+                        f"EARLY SIGNAL SENT*\n"
 
                         f"📍 Market Price: "
                         f"${price:,.2f}\n"
 
-                        f"🟢 Full signal "
+                        f"📡 Full signal "
                         f"sent above."
                     )
 
                 # =============================================
-                # NO COMPLETE SETUP
+                # NO SIGNAL
                 # =============================================
 
                 else:
 
                     print(
-
                         f"ℹ️ {asset}: "
-                        f"No complete setup."
+                        f"No qualifying setup."
                     )
 
                     telegram_updates.append(
 
                         f"ℹ️ *{asset}: "
-                        f"NO COMPLETE SETUP*\n"
+                        f"NO QUALIFYING SIGNAL*\n"
 
                         f"📍 Market Price: "
                         f"${price:,.2f}\n"
@@ -1222,8 +1871,7 @@ def run_strategy():
                         f"📊 Candles: "
                         f"{len(candles)}\n"
 
-                        f"⏳ Waiting for all "
-                        f"strategy conditions."
+                        f"⏳ Monitoring early momentum."
                     )
 
             # =================================================
@@ -1239,7 +1887,7 @@ def run_strategy():
             )
 
             # =================================================
-            # EVERY-2-MINUTE TELEGRAM UPDATE
+            # 2-MINUTE TELEGRAM UPDATE
             # =================================================
 
             update_message = (
@@ -1257,16 +1905,16 @@ def run_strategy():
 
                 f"⏰ {timestamp}\n"
 
-                "🔄 Next update: "
-                "~2 minutes"
+                "⚡ Early-entry detection: ON\n"
+
+                "💯 Strength scoring: ON\n"
+
+                "🔄 Next scan: ~2 minutes"
             )
 
             send_telegram(
-
                 telegram_token,
-
                 telegram_chat_id,
-
                 update_message
             )
 
@@ -1287,16 +1935,12 @@ def run_strategy():
 
                 "━━━━━━━━━━━━━━━━━━\n"
 
-                "🔄 Bot will continue "
-                "trying."
+                "🔄 Bot will continue trying."
             )
 
             send_telegram(
-
                 telegram_token,
-
                 telegram_chat_id,
-
                 error_message
             )
 
@@ -1310,14 +1954,11 @@ def run_strategy():
         )
 
         sleep_time = max(
-
             1,
-
             120 - elapsed
         )
 
         print(
-
             f"⏱️ Next scan in "
             f"{sleep_time:.1f} seconds."
         )
@@ -1334,11 +1975,8 @@ def run_strategy():
 if __name__ == "__main__":
 
     Thread(
-
         target=keep_web_server_alive,
-
         daemon=True
-
     ).start()
 
     run_strategy()
