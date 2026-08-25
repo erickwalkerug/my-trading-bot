@@ -5,6 +5,7 @@ from threading import Thread
 from flask import Flask
 import requests
 
+
 # ============================================================
 # MATRIX STRATEGY ENGINE
 # EARLY ENTRY VERSION
@@ -12,14 +13,18 @@ import requests
 # TIMEFRAME: 1 MINUTE
 # SCAN: EVERY 2 MINUTES
 #
+# TELEGRAM:
+# Sends to BOTH:
+# 1. Telegram bot/chat
+# 2. Telegram channel
+#
 # INDICATORS:
 # EMA 9 / EMA 26
 # RSI 14
 # ONE MACD 12 / 26 / 9
 #
-# SIGNALS:
-# Sends every qualifying setup.
-# Signal strength = strategy alignment score, NOT win probability.
+# SIGNAL STRENGTH:
+# Strategy-alignment score, NOT win probability.
 # ============================================================
 
 
@@ -46,50 +51,81 @@ def keep_web_server_alive():
 
 # ============================================================
 # TELEGRAM
+# SEND TO BOTH BOT CHAT AND CHANNEL
 # ============================================================
 
-def send_telegram(token, chat_id, message):
+def send_telegram(token, chat_id, channel_id, message):
 
-    if not token or not chat_id:
-
-        print("❌ Telegram credentials missing.")
-
+    if not token:
+        print("❌ TELEGRAM_BOT_TOKEN is missing.")
         return False
+
+    destinations = []
+
+    if chat_id:
+        destinations.append(
+            ("BOT/CHAT", chat_id)
+        )
+
+    if channel_id:
+        destinations.append(
+            ("CHANNEL", channel_id)
+        )
+
+    if not destinations:
+        print(
+            "❌ No Telegram destination configured."
+        )
+        return False
+
+    success_count = 0
 
     url = (
         f"https://api.telegram.org/"
         f"bot{token}/sendMessage"
     )
 
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
+    for destination_name, destination_id in destinations:
 
-    try:
+        payload = {
+            "chat_id": destination_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
 
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=15
-        )
+        try:
 
-        print(
-            "Telegram:",
-            response.status_code,
-            response.text[:300]
-        )
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=15
+            )
 
-        return response.status_code == 200
+            print(
+                f"Telegram {destination_name}:",
+                response.status_code,
+                response.text[:300]
+            )
 
-    except Exception as e:
+            if response.status_code == 200:
 
-        print(
-            f"❌ Telegram error: {e}"
-        )
+                success_count += 1
 
-        return False
+            else:
+
+                print(
+                    f"❌ Failed to send to "
+                    f"{destination_name}"
+                )
+
+        except Exception as e:
+
+            print(
+                f"❌ Telegram error "
+                f"({destination_name}): {e}"
+            )
+
+    return success_count > 0
 
 
 # ============================================================
@@ -335,7 +371,7 @@ def calculate_macd_series(prices):
             )
         )
 
-    if not signal_values:
+    if len(signal_values) < 2:
 
         return None
 
@@ -368,7 +404,7 @@ def calculate_macd_series(prices):
 # ============================================================
 # DETECT RECENT MACD CROSS
 #
-# Allows an early entry shortly after a crossover.
+# Allows early entry shortly after crossover.
 # ============================================================
 
 def recent_bullish_macd_cross(
@@ -404,6 +440,30 @@ def recent_bullish_macd_cross(
 
             continue
 
+        signal_offset = (
+            len(macd_values)
+            - len(signal_values)
+        )
+
+        current_signal_index = (
+            current_index
+            - signal_offset
+        )
+
+        previous_signal_index = (
+            previous_index
+            - signal_offset
+        )
+
+        if (
+            current_signal_index < 0
+            or previous_signal_index < 0
+            or current_signal_index >= len(signal_values)
+            or previous_signal_index >= len(signal_values)
+        ):
+
+            continue
+
         current_macd = (
             macd_values[current_index]
         )
@@ -413,23 +473,11 @@ def recent_bullish_macd_cross(
         )
 
         current_signal = (
-            signal_values[
-                min(
-                    current_index
-                    - 8,
-                    len(signal_values) - 1
-                )
-            ]
+            signal_values[current_signal_index]
         )
 
         previous_signal = (
-            signal_values[
-                min(
-                    previous_index
-                    - 8,
-                    len(signal_values) - 1
-                )
-            ]
+            signal_values[previous_signal_index]
         )
 
         if (
@@ -476,6 +524,30 @@ def recent_bearish_macd_cross(
 
             continue
 
+        signal_offset = (
+            len(macd_values)
+            - len(signal_values)
+        )
+
+        current_signal_index = (
+            current_index
+            - signal_offset
+        )
+
+        previous_signal_index = (
+            previous_index
+            - signal_offset
+        )
+
+        if (
+            current_signal_index < 0
+            or previous_signal_index < 0
+            or current_signal_index >= len(signal_values)
+            or previous_signal_index >= len(signal_values)
+        ):
+
+            continue
+
         current_macd = (
             macd_values[current_index]
         )
@@ -485,23 +557,11 @@ def recent_bearish_macd_cross(
         )
 
         current_signal = (
-            signal_values[
-                min(
-                    current_index
-                    - 8,
-                    len(signal_values) - 1
-                )
-            ]
+            signal_values[current_signal_index]
         )
 
         previous_signal = (
-            signal_values[
-                min(
-                    previous_index
-                    - 8,
-                    len(signal_values) - 1
-                )
-            ]
+            signal_values[previous_signal_index]
         )
 
         if (
@@ -643,9 +703,7 @@ last_signal = {}
 # SIGNAL INTERPRETATION
 # ============================================================
 
-def get_strength_interpretation(
-    score
-):
+def get_strength_interpretation(score):
 
     if score >= 90:
 
@@ -945,7 +1003,6 @@ def analyze_market(
         rsi < previous_rsi
     )
 
-    # Avoid buying an extremely overextended RSI.
     buy_rsi_zone = (
         30 < rsi < 75
     )
@@ -962,7 +1019,6 @@ def analyze_market(
 
     buy_reasons = []
 
-    # EMA trend/alignment
     if ema_bullish:
 
         buy_score += 15
@@ -987,7 +1043,6 @@ def analyze_market(
             "EMA bullish crossover"
         )
 
-    # MACD
     if bullish_macd:
 
         buy_score += 15
@@ -1020,7 +1075,6 @@ def analyze_market(
             "Recent MACD crossover"
         )
 
-    # RSI
     if buy_rsi_zone:
 
         buy_score += 8
@@ -1037,7 +1091,6 @@ def analyze_market(
             "RSI rising"
         )
 
-    # Price momentum
     if bullish_candle:
 
         buy_score += 5
@@ -1054,7 +1107,6 @@ def analyze_market(
             "Short-term price momentum"
         )
 
-    # Structure
     if higher_structure:
 
         buy_score += 4
@@ -1071,7 +1123,6 @@ def analyze_market(
 
     sell_reasons = []
 
-    # EMA trend/alignment
     if ema_bearish:
 
         sell_score += 15
@@ -1096,7 +1147,6 @@ def analyze_market(
             "EMA bearish crossover"
         )
 
-    # MACD
     if bearish_macd:
 
         sell_score += 15
@@ -1129,7 +1179,6 @@ def analyze_market(
             "Recent MACD crossover"
         )
 
-    # RSI
     if sell_rsi_zone:
 
         sell_score += 8
@@ -1146,7 +1195,6 @@ def analyze_market(
             "RSI falling"
         )
 
-    # Price momentum
     if bearish_candle:
 
         sell_score += 5
@@ -1163,7 +1211,6 @@ def analyze_market(
             "Short-term price momentum"
         )
 
-    # Structure
     if lower_structure:
 
         sell_score += 4
@@ -1209,7 +1256,7 @@ def analyze_market(
         return None
 
     # ========================================================
-    # ADD INTERPRETATION
+    # INTERPRETATION
     # ========================================================
 
     interpretation = (
@@ -1225,9 +1272,7 @@ def analyze_market(
     entry = current_price
 
     # ========================================================
-    # STOP LOSS
-    #
-    # Use recent swing area.
+    # STOP LOSS / TAKE PROFIT
     # ========================================================
 
     recent_lows = [
@@ -1307,7 +1352,6 @@ def analyze_market(
         )
 
     price_move_percent = (
-
         price_move
         / entry
         * 100
@@ -1483,6 +1527,13 @@ def analyze_market(
     # SIGNAL MESSAGE
     # ========================================================
 
+    structure_text = (
+        "Higher High + Higher Low"
+        if signal_type == "BUY"
+        else
+        "Lower High + Lower Low"
+    )
+
     message = (
 
         f"🤖 *EARLY ENTRY SIGNAL — "
@@ -1540,7 +1591,7 @@ def analyze_market(
         f"{macd_status}\n"
 
         f"└ Structure: "
-        f"{'Higher High + Higher Low' if signal_type == 'BUY' else 'Lower High + Lower Low'}\n"
+        f"{structure_text}\n"
 
         f"━━━━━━━━━━━━━━━━━━\n"
 
@@ -1580,6 +1631,10 @@ def run_strategy():
         "TELEGRAM_CHAT_ID"
     )
 
+    telegram_channel_id = os.environ.get(
+        "TELEGRAM_CHANNEL_ID"
+    )
+
     twelve_key = os.environ.get(
         "TWELVE_DATA_API_KEY"
     )
@@ -1591,22 +1646,25 @@ def run_strategy():
     if not telegram_token:
 
         print(
-            "❌ TELEGRAM_BOT_TOKEN "
-            "is missing."
+            "❌ TELEGRAM_BOT_TOKEN is missing."
         )
 
     if not telegram_chat_id:
 
         print(
-            "❌ TELEGRAM_CHAT_ID "
-            "is missing."
+            "⚠️ TELEGRAM_CHAT_ID is missing."
+        )
+
+    if not telegram_channel_id:
+
+        print(
+            "⚠️ TELEGRAM_CHANNEL_ID is missing."
         )
 
     if not twelve_key:
 
         print(
-            "❌ TWELVE_DATA_API_KEY "
-            "is missing."
+            "❌ TWELVE_DATA_API_KEY is missing."
         )
 
     print(
@@ -1648,7 +1706,8 @@ def run_strategy():
     )
 
     print(
-        "📡 Qualifying signals: ALL SENT"
+        "📡 Telegram destinations: "
+        "BOT + CHANNEL"
     )
 
     # ========================================================
@@ -1662,7 +1721,9 @@ def run_strategy():
 
         "━━━━━━━━━━━━━━━━━━\n"
 
-        "✅ Telegram connected\n"
+        "✅ Telegram bot connected\n"
+
+        "✅ Telegram channel connected\n"
 
         "✅ Render service running\n"
 
@@ -1687,8 +1748,8 @@ def run_strategy():
 
         "💯 Signal-strength scoring ON\n"
 
-        "📡 All qualifying signals "
-        "will be sent.\n"
+        "📡 Signals sent to "
+        "BOT + CHANNEL\n"
 
         "━━━━━━━━━━━━━━━━━━\n"
 
@@ -1700,6 +1761,7 @@ def run_strategy():
     send_telegram(
         telegram_token,
         telegram_chat_id,
+        telegram_channel_id,
         startup_message
     )
 
@@ -1834,6 +1896,7 @@ def run_strategy():
                     send_telegram(
                         telegram_token,
                         telegram_chat_id,
+                        telegram_channel_id,
                         signal
                     )
 
@@ -1845,8 +1908,8 @@ def run_strategy():
                         f"📍 Market Price: "
                         f"${price:,.2f}\n"
 
-                        f"📡 Full signal "
-                        f"sent above."
+                        f"📡 Signal sent to "
+                        f"BOT + CHANNEL."
                     )
 
                 # =============================================
@@ -1909,12 +1972,15 @@ def run_strategy():
 
                 "💯 Strength scoring: ON\n"
 
+                "📡 Destination: BOT + CHANNEL\n"
+
                 "🔄 Next scan: ~2 minutes"
             )
 
             send_telegram(
                 telegram_token,
                 telegram_chat_id,
+                telegram_channel_id,
                 update_message
             )
 
@@ -1941,6 +2007,7 @@ def run_strategy():
             send_telegram(
                 telegram_token,
                 telegram_chat_id,
+                telegram_channel_id,
                 error_message
             )
 
