@@ -2,9 +2,9 @@ import os
 import time
 import datetime
 import math
-from threading import Thread
+from threading import Thread, Lock
 
-from flask import Flask
+from flask import Flask, jsonify, request
 import requests
 
 
@@ -19,7 +19,10 @@ import requests
 # 1. BOT = FULL TECHNICAL / INTELLIGENCE MESSAGE
 # 2. CHANNEL = CLEAN PUBLIC SIGNAL
 #
-# CORE RULES PRESERVED:
+# WEBSITE:
+# SECURE SIGNAL API
+#
+# CORE RULES:
 # EMA 9 / EMA 26
 # RSI 14
 # ONE MACD 12 / 26 / 9
@@ -43,6 +46,14 @@ import requests
 # SIGNAL STRENGTH:
 # STRATEGY-ALIGNMENT SCORE
 # NOT WIN PROBABILITY
+#
+# WEBSITE API:
+# GET /api/health
+# GET /api/signals
+# GET /api/signals/<asset>
+#
+# API RETENTION:
+# MOST RECENT 7 DAYS
 # ============================================================
 
 
@@ -53,8 +64,269 @@ import requests
 app = Flask(__name__)
 
 
+# ============================================================
+# KETS SECURE SIGNAL API
+# ============================================================
+
+API_KEY = os.environ.get("KETS_API_KEY")
+
+signal_history = []
+signal_lock = Lock()
+
+SIGNAL_RETENTION_DAYS = 7
+
+
+def clean_old_signals():
+
+    cutoff = (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(
+            days=SIGNAL_RETENTION_DAYS
+        )
+    )
+
+    with signal_lock:
+
+        kept = []
+
+        for signal in signal_history:
+
+            try:
+
+                signal_time = datetime.datetime.fromisoformat(
+                    signal["timestamp_utc"]
+                )
+
+                if signal_time >= cutoff:
+
+                    kept.append(signal)
+
+            except Exception:
+
+                continue
+
+        signal_history.clear()
+        signal_history.extend(kept)
+
+
+def save_signal_for_api(
+    asset,
+    signal
+):
+
+    now_utc = datetime.datetime.now(
+        datetime.timezone.utc
+    )
+
+    api_signal = {
+
+        "id": (
+            f"{asset}-"
+            f"{signal['direction']}-"
+            f"{int(now_utc.timestamp())}"
+        ),
+
+        "asset":
+            asset,
+
+        "direction":
+            signal["direction"],
+
+        "score":
+            signal["score"],
+
+        "market_price":
+            signal["entry"],
+
+        "take_profit":
+            signal["take_profit"],
+
+        "stop_loss":
+            signal["stop_loss"],
+
+        "expected_price_move":
+            signal["price_move"],
+
+        "expected_price_move_percent":
+            signal["price_move_percent"],
+
+        "estimated_duration":
+            signal["duration_text"],
+
+        "classification":
+            signal["classification"],
+
+        "interpretation":
+            signal["interpretation"],
+
+        "timestamp":
+            signal["timestamp"],
+
+        "timestamp_utc":
+            now_utc.isoformat(),
+
+        "status":
+            "ACTIVE"
+    }
+
+    with signal_lock:
+
+        signal_history.append(
+            api_signal
+        )
+
+    clean_old_signals()
+
+    return api_signal
+
+
+def check_api_key():
+
+    if not API_KEY:
+
+        return False
+
+    supplied_key = request.headers.get(
+        "X-KETS-API-KEY"
+    )
+
+    return supplied_key == API_KEY
+
+
+@app.route("/api/health")
+def api_health():
+
+    return jsonify({
+
+        "status":
+            "online",
+
+        "service":
+            "KETS Strategy Engine",
+
+        "strategy":
+            "KETS original strategy",
+
+        "scan_interval_seconds":
+            120,
+
+        "api":
+            "online"
+
+    })
+
+
+@app.route("/api/signals")
+def api_signals():
+
+    if not check_api_key():
+
+        return jsonify({
+            "error":
+                "Unauthorized"
+        }), 401
+
+    clean_old_signals()
+
+    limit = request.args.get(
+        "limit",
+        default=50,
+        type=int
+    )
+
+    limit = max(
+        1,
+        min(limit, 200)
+    )
+
+    asset = request.args.get(
+        "asset"
+    )
+
+    with signal_lock:
+
+        signals = list(
+            signal_history
+        )
+
+    if asset:
+
+        signals = [
+
+            signal
+
+            for signal in signals
+
+            if signal["asset"].upper()
+            == asset.upper()
+
+        ]
+
+    signals = list(
+        reversed(signals)
+    )[:limit]
+
+    return jsonify({
+
+        "status":
+            "success",
+
+        "count":
+            len(signals),
+
+        "signals":
+            signals
+
+    })
+
+
+@app.route("/api/signals/<asset>")
+def api_asset_signals(asset):
+
+    if not check_api_key():
+
+        return jsonify({
+            "error":
+                "Unauthorized"
+        }), 401
+
+    clean_old_signals()
+
+    with signal_lock:
+
+        signals = [
+
+            signal
+
+            for signal in signal_history
+
+            if signal["asset"].upper()
+            == asset.upper()
+
+        ]
+
+    return jsonify({
+
+        "status":
+            "success",
+
+        "asset":
+            asset.upper(),
+
+        "count":
+            len(signals),
+
+        "signals":
+            list(
+                reversed(signals)
+            )
+
+    })
+
+
 @app.route("/")
 def home():
+
     return "KETS Strategy Engine Online"
 
 
@@ -87,16 +359,20 @@ def send_message(
 ):
 
     if not token:
+
         print(
             "❌ TELEGRAM_BOT_TOKEN is missing."
         )
+
         return False
 
     if not destination_id:
+
         print(
             f"⚠️ {destination_name} "
             f"destination is missing."
         )
+
         return False
 
     url = (
@@ -105,9 +381,16 @@ def send_message(
     )
 
     payload = {
-        "chat_id": destination_id,
-        "text": message,
-        "parse_mode": "Markdown"
+
+        "chat_id":
+            destination_id,
+
+        "text":
+            message,
+
+        "parse_mode":
+            "Markdown"
+
     }
 
     try:
@@ -229,8 +512,13 @@ def get_markets():
         }
 
     return {
-        "BTC": "BTC/USD",
-        "GOLD": "XAU/USD"
+
+        "BTC":
+            "BTC/USD",
+
+        "GOLD":
+            "XAU/USD"
+
     }
 
 
@@ -244,6 +532,7 @@ def calculate_ema(
 ):
 
     if not prices:
+
         return 0.0
 
     if len(prices) < period:
@@ -283,6 +572,7 @@ def calculate_rsi(
 ):
 
     if len(prices) < period + 1:
+
         return 50.0
 
     gains = []
@@ -365,6 +655,7 @@ def calculate_rsi(
 def calculate_macd_series(prices):
 
     if len(prices) < 40:
+
         return None
 
     macd_values = []
@@ -391,6 +682,7 @@ def calculate_macd_series(prices):
         )
 
     if len(macd_values) < 12:
+
         return None
 
     signal_values = []
@@ -408,9 +700,11 @@ def calculate_macd_series(prices):
         )
 
     if len(signal_values) < 2:
+
         return None
 
     return {
+
         "macd":
             macd_values[-1],
 
@@ -428,6 +722,7 @@ def calculate_macd_series(prices):
 
         "signal_values":
             signal_values
+
     }
 
 
@@ -449,6 +744,7 @@ def recent_macd_cross(
     )
 
     if usable <= 0:
+
         return False
 
     signal_offset = (
@@ -485,6 +781,7 @@ def recent_macd_cross(
             or current_signal_index >= len(signal_values)
             or previous_signal_index >= len(signal_values)
         ):
+
             continue
 
         cm = macd_values[
@@ -509,6 +806,7 @@ def recent_macd_cross(
                 pm <= ps
                 and cm > cs
             ):
+
                 return True
 
         else:
@@ -517,6 +815,7 @@ def recent_macd_cross(
                 pm >= ps
                 and cm < cs
             ):
+
                 return True
 
     return False
@@ -532,6 +831,7 @@ def calculate_atr(
 ):
 
     if len(candles) < period + 1:
+
         return 0.0
 
     true_ranges = []
@@ -548,14 +848,23 @@ def calculate_atr(
         ]["close"]
 
         tr = max(
+
             high - low,
-            abs(high - prev_close),
-            abs(low - prev_close)
+
+            abs(
+                high - prev_close
+            ),
+
+            abs(
+                low - prev_close
+            )
+
         )
 
         true_ranges.append(tr)
 
     if len(true_ranges) < period:
+
         return 0.0
 
     atr = (
@@ -590,10 +899,18 @@ def calculate_adx(
     if len(candles) < (
         period * 2 + 1
     ):
+
         return {
-            "adx": 0.0,
-            "plus_di": 0.0,
-            "minus_di": 0.0
+
+            "adx":
+                0.0,
+
+            "plus_di":
+                0.0,
+
+            "minus_di":
+                0.0
+
         }
 
     trs = []
@@ -641,6 +958,7 @@ def calculate_adx(
             mdm = 0.0
 
         tr = max(
+
             current["high"]
             - current["low"],
 
@@ -653,6 +971,7 @@ def calculate_adx(
                 current["low"]
                 - previous["close"]
             )
+
         )
 
         trs.append(tr)
@@ -660,10 +979,18 @@ def calculate_adx(
         minus_dm.append(mdm)
 
     if len(trs) < period:
+
         return {
-            "adx": 0.0,
-            "plus_di": 0.0,
-            "minus_di": 0.0
+
+            "adx":
+                0.0,
+
+            "plus_di":
+                0.0,
+
+            "minus_di":
+                0.0
+
         }
 
     atr = (
@@ -713,6 +1040,7 @@ def calculate_adx(
         ) / period
 
         if atr == 0:
+
             continue
 
         plus_di = (
@@ -729,6 +1057,7 @@ def calculate_adx(
         )
 
         if denominator == 0:
+
             dx = 0.0
 
         else:
@@ -747,9 +1076,16 @@ def calculate_adx(
     if not dx_values:
 
         return {
-            "adx": 0.0,
-            "plus_di": 0.0,
-            "minus_di": 0.0
+
+            "adx":
+                0.0,
+
+            "plus_di":
+                0.0,
+
+            "minus_di":
+                0.0
+
         }
 
     if len(dx_values) < period:
@@ -794,16 +1130,21 @@ def calculate_adx(
         )
 
     return {
-        "adx": adx,
-        "plus_di": plus_di,
-        "minus_di": minus_di
+
+        "adx":
+            adx,
+
+        "plus_di":
+            plus_di,
+
+        "minus_di":
+            minus_di
+
     }
 
 
 # ============================================================
 # AGGREGATE 1-MIN CANDLES INTO HIGHER TIMEFRAMES
-#
-# This avoids extra Twelve Data requests.
 # ============================================================
 
 def aggregate_candles(
@@ -812,6 +1153,7 @@ def aggregate_candles(
 ):
 
     if not candles:
+
         return []
 
     grouped = {}
@@ -854,15 +1196,22 @@ def aggregate_candles(
         if key not in grouped:
 
             grouped[key] = {
-                "datetime": key,
+
+                "datetime":
+                    key,
+
                 "open":
                     candle["open"],
+
                 "high":
                     candle["high"],
+
                 "low":
                     candle["low"],
+
                 "close":
                     candle["close"]
+
             }
 
         else:
@@ -895,6 +1244,7 @@ def timeframe_direction(
 ):
 
     if len(candles) < 3:
+
         return "NEUTRAL"
 
     closes = [
@@ -926,9 +1276,11 @@ def timeframe_direction(
     slow = sum(closes) / len(closes)
 
     if fast > slow:
+
         return "BULLISH"
 
     if fast < slow:
+
         return "BEARISH"
 
     return "NEUTRAL"
@@ -948,9 +1300,16 @@ def candle_quality(candle):
     if candle_range <= 0:
 
         return {
-            "quality": "INVALID",
-            "direction": "NEUTRAL",
-            "strength": 0
+
+            "quality":
+                "INVALID",
+
+            "direction":
+                "NEUTRAL",
+
+            "strength":
+                0
+
         }
 
     body = abs(
@@ -984,12 +1343,15 @@ def candle_quality(candle):
         direction = "BULLISH"
 
         if body_ratio >= 0.70:
+
             quality = "STRONG BULLISH"
 
         elif body_ratio >= 0.45:
+
             quality = "GOOD BULLISH"
 
         else:
+
             quality = "WEAK BULLISH"
 
     elif candle["close"] < candle["open"]:
@@ -997,12 +1359,15 @@ def candle_quality(candle):
         direction = "BEARISH"
 
         if body_ratio >= 0.70:
+
             quality = "STRONG BEARISH"
 
         elif body_ratio >= 0.45:
+
             quality = "GOOD BEARISH"
 
         else:
+
             quality = "WEAK BEARISH"
 
     else:
@@ -1016,17 +1381,25 @@ def candle_quality(candle):
         quality = "INDECISION / WEAK"
 
     return {
-        "quality": quality,
-        "direction": direction,
+
+        "quality":
+            quality,
+
+        "direction":
+            direction,
+
         "strength":
             round(
                 body_ratio * 100,
                 1
             ),
+
         "upper_wick":
             upper_wick,
+
         "lower_wick":
             lower_wick
+
     }
 
 
@@ -1041,9 +1414,16 @@ def momentum_analysis(
     if len(candles) < 6:
 
         return {
-            "direction": "NEUTRAL",
-            "state": "UNKNOWN",
-            "change": 0.0
+
+            "direction":
+                "NEUTRAL",
+
+            "state":
+                "UNKNOWN",
+
+            "change":
+                0.0
+
         }
 
     closes = [
@@ -1092,9 +1472,16 @@ def momentum_analysis(
         state = "STABLE"
 
     return {
-        "direction": direction,
-        "state": state,
-        "change": recent_change
+
+        "direction":
+            direction,
+
+        "state":
+            state,
+
+        "change":
+            recent_change
+
     }
 
 
@@ -1122,10 +1509,13 @@ def find_levels(
     ]
 
     return {
+
         "support":
             min(lows),
+
         "resistance":
             max(highs)
+
     }
 
 
@@ -1160,6 +1550,7 @@ def calculate_vwap(
         )
 
         if volume <= 0:
+
             continue
 
         typical_price = (
@@ -1176,6 +1567,7 @@ def calculate_vwap(
         total_volume += volume
 
     if total_volume <= 0:
+
         return None
 
     return (
@@ -1216,13 +1608,19 @@ def detect_market_regime(
 
         if atr > avg_range * 1.20:
 
-            return "TRENDING / HIGH VOLATILITY"
+            return (
+                "TRENDING / "
+                "HIGH VOLATILITY"
+            )
 
         return "TRENDING"
 
     if atr < avg_range * 0.75:
 
-        return "LOW VOLATILITY / RANGE"
+        return (
+            "LOW VOLATILITY / "
+            "RANGE"
+        )
 
     return "RANGE / TRANSITION"
 
@@ -1237,15 +1635,20 @@ def check_data_quality(
 
     if len(candles) < 40:
 
-        return False, "Insufficient candles"
+        return (
+            False,
+            "Insufficient candles"
+        )
 
     for candle in candles[-40:]:
 
         values = [
+
             candle["open"],
             candle["high"],
             candle["low"],
             candle["close"]
+
         ]
 
         if not all(
@@ -1253,16 +1656,25 @@ def check_data_quality(
             for v in values
         ):
 
-            return False, "Invalid price data"
+            return (
+                False,
+                "Invalid price data"
+            )
 
         if (
             candle["high"]
             < candle["low"]
         ):
 
-            return False, "Invalid candle range"
+            return (
+                False,
+                "Invalid candle range"
+            )
 
-    return True, "GOOD"
+    return (
+        True,
+        "GOOD"
+    )
 
 
 # ============================================================
@@ -1278,8 +1690,13 @@ def check_overextension(
     if atr <= 0:
 
         return {
-            "extended": False,
-            "distance": 0.0
+
+            "extended":
+                False,
+
+            "distance":
+                0.0
+
         }
 
     distance = abs(
@@ -1292,12 +1709,16 @@ def check_overextension(
     )
 
     return {
+
         "extended":
             ratio >= 1.50,
+
         "distance":
             distance,
+
         "ratio":
             ratio
+
     }
 
 
@@ -1420,6 +1841,7 @@ def fetch_1m_candles(
     )
 
     params = {
+
         "symbol":
             symbol,
 
@@ -1437,6 +1859,7 @@ def fetch_1m_candles(
 
         "apikey":
             api_key
+
     }
 
     try:
@@ -1481,6 +1904,7 @@ def fetch_1m_candles(
             try:
 
                 candle = {
+
                     "datetime":
                         item["datetime"],
 
@@ -1495,6 +1919,7 @@ def fetch_1m_candles(
 
                     "close":
                         float(item["close"])
+
                 }
 
                 if "volume" in item:
@@ -2000,8 +2425,8 @@ def analyze_market(
     # ========================================================
     # CURRENT CORE DIRECTION
     #
-    # Existing threshold preserved:
-    # minimum 55 core points.
+    # EXISTING THRESHOLD PRESERVED:
+    # MINIMUM 55 CORE POINTS.
     # ========================================================
 
     if (
@@ -2063,8 +2488,6 @@ def analyze_market(
 
     # ========================================================
     # HIGHER TIMEFRAME CONTEXT
-    # Derived from existing 1M data.
-    # No extra Twelve Data request.
     # ========================================================
 
     candles_5m = aggregate_candles(
@@ -2115,9 +2538,6 @@ def analyze_market(
 
     # ========================================================
     # ADVANCED BONUS SCORE
-    #
-    # These layers RANK the existing signal.
-    # They do not replace the core rules.
     # ========================================================
 
     advanced_bonus = 0
@@ -2507,7 +2927,7 @@ def analyze_market(
     # ========================================================
     # STOP LOSS / TAKE PROFIT
     #
-    # Existing 2:1 logic preserved.
+    # EXISTING 2:1 LOGIC PRESERVED.
     # ========================================================
 
     recent_lows = [
@@ -2538,6 +2958,7 @@ def analyze_market(
         )
 
         if risk <= 0:
+
             return None
 
         take_profit = (
@@ -2563,6 +2984,7 @@ def analyze_market(
         )
 
         if risk <= 0:
+
             return None
 
         take_profit = (
@@ -2981,7 +3403,14 @@ def analyze_market(
         f"not a guaranteed win probability.*"
     )
 
+    # ========================================================
+    # RETURN SIGNAL
+    #
+    # API REQUIRES THE PUBLIC SIGNAL FIELDS BELOW.
+    # ========================================================
+
     return {
+
         "bot":
             bot_message,
 
@@ -2992,7 +3421,35 @@ def analyze_market(
             signal_type,
 
         "score":
-            score
+            score,
+
+        "entry":
+            entry,
+
+        "take_profit":
+            take_profit,
+
+        "stop_loss":
+            stop_loss,
+
+        "price_move":
+            price_move,
+
+        "price_move_percent":
+            price_move_percent,
+
+        "duration_text":
+            duration_text,
+
+        "classification":
+            classification,
+
+        "interpretation":
+            interpretation,
+
+        "timestamp":
+            timestamp
+
     }
 
 
@@ -3013,6 +3470,8 @@ def build_startup_messages():
         "✅ Telegram channel connected\n"
 
         "✅ Render service running\n"
+
+        "🌐 Secure website API enabled\n"
 
         "📊 Timeframe: 1 minute\n"
 
@@ -3141,6 +3600,20 @@ def run_strategy():
             "❌ TWELVE_DATA_API_KEY missing."
         )
 
+    if not API_KEY:
+
+        print(
+            "⚠️ KETS_API_KEY missing. "
+            "Website signal endpoints will "
+            "return Unauthorized."
+        )
+
+    else:
+
+        print(
+            "🔐 KETS secure API key loaded."
+        )
+
     print(
         "🚀 KETS Strategy Engine started."
     )
@@ -3172,6 +3645,14 @@ def run_strategy():
 
     print(
         "📡 Bot = FULL / Channel = CLEAN"
+    )
+
+    print(
+        "🌐 Website API = ENABLED"
+    )
+
+    print(
+        "🗂️ API retention = 7 days"
     )
 
     # ========================================================
@@ -3281,12 +3762,14 @@ def run_strategy():
 
                         f"❌ *{asset}*\n"
                         f"Market data unavailable."
+
                     )
 
                     channel_updates.append(
 
                         f"❌ *{asset}*\n"
                         f"Market data unavailable."
+
                     )
 
                     continue
@@ -3327,6 +3810,26 @@ def run_strategy():
                         f"{signal['score']}%"
                     )
 
+                    # =========================================
+                    # SAVE SIGNAL FOR WEBSITE API
+                    # =========================================
+
+                    api_signal = (
+                        save_signal_for_api(
+                            asset,
+                            signal
+                        )
+                    )
+
+                    print(
+                        f"🌐 API signal stored: "
+                        f"{api_signal['id']}"
+                    )
+
+                    # =========================================
+                    # TELEGRAM
+                    # =========================================
+
                     send_to_bot_and_channel(
                         telegram_token,
                         telegram_chat_id,
@@ -3348,6 +3851,7 @@ def run_strategy():
 
                         f"📍 Price: "
                         f"${price:,.2f}"
+
                     )
 
                     channel_updates.append(
@@ -3357,6 +3861,7 @@ def run_strategy():
 
                         f"📍 Price: "
                         f"${price:,.2f}"
+
                     )
 
                 # =============================================
@@ -3382,6 +3887,7 @@ def run_strategy():
                         f"{len(candles)}\n"
 
                         f"⏳ Monitoring early momentum."
+
                     )
 
                     channel_updates.append(
@@ -3393,6 +3899,7 @@ def run_strategy():
                         f"${price:,.2f}\n"
 
                         f"⏳ Monitoring."
+
                     )
 
             # =================================================
@@ -3432,7 +3939,10 @@ def run_strategy():
 
                 "📡 Destination: BOT + CHANNEL\n"
 
+                "🌐 Website API: ON\n"
+
                 "🔄 Next scan: ~2 minutes"
+
             )
 
             # =================================================
@@ -3459,6 +3969,7 @@ def run_strategy():
                 "📡 KETS market monitoring active\n"
 
                 "🔄 Next scan: ~2 minutes"
+
             )
 
             send_to_bot_and_channel(
@@ -3487,6 +3998,7 @@ def run_strategy():
                 "━━━━━━━━━━━━━━━━━━\n"
 
                 "🔄 Engine will continue trying."
+
             )
 
             error_channel = (
@@ -3499,6 +4011,7 @@ def run_strategy():
                 "was detected.\n"
 
                 "🔄 Monitoring will continue."
+
             )
 
             send_to_bot_and_channel(
