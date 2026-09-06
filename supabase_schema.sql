@@ -1,5 +1,7 @@
 -- KETS permanent storage schema for Supabase/PostgreSQL
--- Run this once in Supabase SQL Editor.
+-- FIX: signal IDs such as BTC-SELL-1788687076633 and SCAN-GOLD-... are TEXT.
+-- Run this entire file once in Supabase SQL Editor.
+-- It safely converts legacy bigint IDs to text before creating indexes.
 
 create table if not exists public.signals (
   id text primary key,
@@ -29,9 +31,6 @@ create table if not exists public.signals (
   status text default 'ACTIVE',
   created_at timestamptz default now()
 );
-
-create index if not exists signals_timestamp_idx on public.signals (timestamp_utc desc);
-create index if not exists signals_asset_idx on public.signals (asset);
 
 create table if not exists public.engine_history (
   id text primary key,
@@ -64,12 +63,33 @@ create table if not exists public.engine_history (
   created_at timestamptz default now()
 );
 
+-- Migrate legacy installations whose id column was accidentally bigint.
+do $$
+declare
+  signals_type text;
+  history_type text;
+begin
+  select data_type into signals_type
+  from information_schema.columns
+  where table_schema='public' and table_name='signals' and column_name='id';
+
+  if signals_type = 'bigint' then
+    alter table public.signals alter column id type text using id::text;
+  end if;
+
+  select data_type into history_type
+  from information_schema.columns
+  where table_schema='public' and table_name='engine_history' and column_name='id';
+
+  if history_type = 'bigint' then
+    alter table public.engine_history alter column id type text using id::text;
+  end if;
+end $$;
+
+create index if not exists signals_timestamp_idx on public.signals (timestamp_utc desc);
+create index if not exists signals_asset_idx on public.signals (asset);
 create index if not exists engine_history_timestamp_idx on public.engine_history (timestamp_utc desc);
 create index if not exists engine_history_asset_idx on public.engine_history (asset);
 
--- The bot uses the Supabase service-role key server-side, so RLS can remain enabled.
 alter table public.signals enable row level security;
 alter table public.engine_history enable row level security;
-
--- No public policies are created here. The website should use its own controlled
--- API/server or narrowly-scoped read policies if it reads Supabase directly.
