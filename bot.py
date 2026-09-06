@@ -9,6 +9,80 @@ import requests
 
 
 # ============================================================
+# SUPABASE PERMANENT STORAGE
+# Server-side only. Never expose SUPABASE_SERVICE_ROLE_KEY to the browser.
+# ============================================================
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_TIMEOUT = 15
+
+def supabase_enabled():
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+def supabase_headers():
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation,resolution=merge-duplicates",
+    }
+
+def supabase_upsert(table, row, on_conflict="id"):
+    if not supabase_enabled():
+        return None
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={on_conflict}",
+            json=row, headers=supabase_headers(), timeout=SUPABASE_TIMEOUT
+        )
+        if r.status_code not in (200, 201):
+            print(f"⚠️ Supabase {table} write failed: HTTP {r.status_code} {r.text[:300]}")
+            return None
+        return r.json() if r.text else []
+    except requests.RequestException as exc:
+        print(f"⚠️ Supabase {table} write failed: {exc}")
+        return None
+
+def supabase_select(table, limit=200, asset=None):
+    if not supabase_enabled():
+        return None
+    try:
+        params = {
+            "select": "*",
+            "order": "timestamp_utc.desc",
+            "limit": str(max(1, min(int(limit), 500))),
+        }
+        if asset:
+            params["asset"] = f"eq.{asset.upper()}"
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            params=params, headers=supabase_headers(), timeout=SUPABASE_TIMEOUT
+        )
+        if r.status_code != 200:
+            print(f"⚠️ Supabase {table} read failed: HTTP {r.status_code} {r.text[:300]}")
+            return None
+        return r.json()
+    except requests.RequestException as exc:
+        print(f"⚠️ Supabase {table} read failed: {exc}")
+        return None
+
+def supabase_cleanup(table, retention_days, max_items=None):
+    if not supabase_enabled():
+        return
+    cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=retention_days)).isoformat()
+    try:
+        r = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            params={"timestamp_utc": f"lt.{cutoff}"},
+            headers=supabase_headers(), timeout=SUPABASE_TIMEOUT
+        )
+        if r.status_code not in (200, 204):
+            print(f"⚠️ Supabase cleanup failed for {table}: HTTP {r.status_code}")
+    except requests.RequestException as exc:
+        print(f"⚠️ Supabase cleanup failed for {table}: {exc}")
+
+
+# ============================================================
 # KETS STRATEGY ENGINE
 # ADVANCED EARLY ENTRY VERSION
 #
@@ -251,7 +325,10 @@ def save_engine_history(
     with engine_history_lock:
         engine_history.append(item)
 
+    # Permanent copy in Supabase. Local memory remains a fast fallback/cache.
+    supabase_upsert("engine_history", item)
     clean_old_engine_history()
+    supabase_cleanup("engine_history", ENGINE_HISTORY_RETENTION_DAYS)
     return item
 
 
@@ -270,7 +347,7 @@ def save_signal_for_api(
         "id": (
             f"{asset}-"
             f"{signal['direction']}-"
-            f"{int(now_utc.timestamp())}"
+            f"{int(now_utc.timestamp() * 1000)}"
         ),
 
         "asset":
@@ -350,12 +427,12 @@ def save_signal_for_api(
     }
 
     with signal_lock:
+        signal_history.append(api_signal)
 
-        signal_history.append(
-            api_signal
-        )
-
+    # Permanent copy in Supabase. Local memory remains a fast fallback/cache.
+    supabase_upsert("signals", api_signal)
     clean_old_signals()
+    supabase_cleanup("signals", SIGNAL_RETENTION_DAYS)
 
     return api_signal
 
@@ -394,7 +471,10 @@ def api_health():
             "online",
 
         "engine_history":
-            "online"
+            "online",
+
+        "supabase":
+            "connected" if supabase_enabled() else "not_configured"
 
     })
 
@@ -429,7 +509,9 @@ def api_receive_signal():
         if payload.get("id") not in existing_ids:
             signal_history.append(payload)
 
+    supabase_upsert("signals", payload)
     clean_old_signals()
+    supabase_cleanup("signals", SIGNAL_RETENTION_DAYS)
 
     print(
         f"📥 WEBSITE SIGNAL RECEIVED: "
@@ -471,11 +553,12 @@ def api_signals():
         "asset"
     )
 
-    with signal_lock:
-
-        signals = list(
-            signal_history
-        )
+    db_signals = supabase_select("signals", limit=200, asset=asset) if supabase_enabled() else None
+    if db_signals is not None:
+        signals = db_signals
+    else:
+        with signal_lock:
+            signals = list(signal_history)
 
     if asset:
 
@@ -521,8 +604,12 @@ def api_engine_history():
     limit = max(1, min(limit, 500))
     asset = request.args.get("asset")
 
-    with engine_history_lock:
-        history = list(engine_history)
+    db_history = supabase_select("engine_history", limit=500, asset=asset) if supabase_enabled() else None
+    if db_history is not None:
+        history = db_history
+    else:
+        with engine_history_lock:
+            history = list(engine_history)
 
     if asset:
         history = [
@@ -551,18 +638,15 @@ def api_asset_signals(asset):
 
     clean_old_signals()
 
-    with signal_lock:
-
-        signals = [
-
-            signal
-
-            for signal in signal_history
-
-            if signal["asset"].upper()
-            == asset.upper()
-
-        ]
+    db_signals = supabase_select("signals", limit=200, asset=asset) if supabase_enabled() else None
+    if db_signals is not None:
+        signals = db_signals
+    else:
+        with signal_lock:
+            signals = [
+                signal for signal in signal_history
+                if signal.get("asset", "").upper() == asset.upper()
+            ]
 
     return jsonify({
 
