@@ -1,16 +1,15 @@
-KETS TRADING BOT — RENDER PERSISTENT STORAGE
+KETS Render storage
+===================
+The bot prefers /var/data/kets_bot.db when a Render Persistent Disk is mounted.
+It automatically creates the directory and checks write access.
 
-Storage: SQLite database on Render Persistent Disk at /var/data/kets_bot.db.
-The KETS strategy is unchanged.
+If /var/data is unavailable or not writable, the bot falls back to:
+    /tmp/kets-data/kets_bot.db
 
-Render disk:
-- Mount path: /var/data
-- Database: /var/data/kets_bot.db
-- Retention: 7 days for signals and engine history
+This fallback prevents the service from crashing on startup. The /tmp filesystem
+is ephemeral, so true persistence requires a Render Persistent Disk mounted at
+/var/data (or another persistent storage service).
 
-Required Render variables:
-- KETS_API_KEY
-- KETS_SIGNAL_SOURCE_URL
-- KETS_SIGNAL_SOURCE_KEY
-
-No Supabase database credentials are required for the bot.
+The SQLite error:
+    sqlite3.OperationalError: unable to open database file
+is therefore handled by the included startup-safe storage code.

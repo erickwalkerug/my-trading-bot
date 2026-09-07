@@ -16,12 +16,37 @@ import requests
 # ============================================================
 import sqlite3
 
-RENDER_DATA_DIR = os.environ.get("KETS_DATA_DIR", "/var/data")
-try:
-    os.makedirs(RENDER_DATA_DIR, exist_ok=True)
-except OSError:
-    pass
-DB_PATH = os.environ.get("KETS_DB_PATH", os.path.join(RENDER_DATA_DIR, "kets_bot.db"))
+# Render Persistent Disk is mounted at /var/data when the service has one.
+# On plans/services without a mounted disk, fall back to a writable temporary
+# directory so the bot can still START instead of crashing.
+def _choose_data_dir():
+    configured = os.environ.get("KETS_DATA_DIR")
+    candidates = [configured] if configured else ["/var/data", "/tmp/kets-data"]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            test_path = os.path.join(candidate, ".kets_write_test")
+            with open(test_path, "a", encoding="utf-8"):
+                pass
+            try:
+                os.remove(test_path)
+            except OSError:
+                pass
+            return candidate
+        except (OSError, PermissionError):
+            continue
+    # Last-resort writable location inside the process filesystem.
+    fallback = os.path.join(os.getcwd(), "data")
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
+
+RENDER_DATA_DIR = _choose_data_dir()
+DB_PATH = os.environ.get("KETS_DB_PATH") or os.path.join(RENDER_DATA_DIR, "kets_bot.db")
+# If an explicit DB path is supplied, ensure its parent exists.
+_db_parent = os.path.dirname(os.path.abspath(DB_PATH))
+os.makedirs(_db_parent, exist_ok=True)
 DB_LOCK = Lock()
 
 def _num(x):
@@ -846,9 +871,10 @@ def get_markets():
             "BTC": "BTC/USD"
         }
 
-    # Monday-Friday: Gold only
+    # Monday-Friday: Gold + Bitcoin
     return {
-        "GOLD": "XAU/USD"
+        "GOLD": "XAU/USD",
+        "BTC": "BTC/USD"
     }
 
 
@@ -2060,7 +2086,8 @@ def check_overextension(
 # ADDITIVE SAFETY FILTER:
 # The existing strategy score is preserved. This layer evaluates
 # whether the CURRENT ENTRY is high quality enough to accompany
-# a 90+ strategy-alignment score.
+# any strategy-alignment score, including lower scores such as 40/100
+# or 50/100. It is telemetry/classification, not a 90+ gate.
 #
 # It does not replace the existing indicators or scoring.
 # ============================================================
@@ -4552,7 +4579,7 @@ def run_strategy():
     )
 
     print(
-        "📅 Weekdays: GOLD ONLY"
+        "📅 Weekdays: GOLD + BTC"
     )
 
     print(
@@ -4650,7 +4677,7 @@ def run_strategy():
             else:
 
                 print(
-                    "🥇 Weekday mode: GOLD ONLY"
+                    "💰 Weekday mode: GOLD + BTC"
                 )
 
             bot_updates = []
