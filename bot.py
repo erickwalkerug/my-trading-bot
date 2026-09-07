@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import math
+import json
 from threading import Thread, Lock
 
 from flask import Flask, jsonify, request
@@ -9,78 +10,92 @@ import requests
 
 
 # ============================================================
-# SUPABASE PERMANENT STORAGE
-# Server-side only. Never expose SUPABASE_SERVICE_ROLE_KEY to the browser.
+# RENDER PERSISTENT STORAGE
+# Uses SQLite on the Render Persistent Disk mounted at /var/data.
+# No Supabase storage is used by the trading bot.
 # ============================================================
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-SUPABASE_TIMEOUT = 15
+import sqlite3
 
-def supabase_enabled():
-    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+RENDER_DATA_DIR = os.environ.get("KETS_DATA_DIR", "/var/data")
+try:
+    os.makedirs(RENDER_DATA_DIR, exist_ok=True)
+except OSError:
+    pass
+DB_PATH = os.environ.get("KETS_DB_PATH", os.path.join(RENDER_DATA_DIR, "kets_bot.db"))
+DB_LOCK = Lock()
 
-def supabase_headers():
-    return {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation,resolution=merge-duplicates",
-    }
-
-def supabase_upsert(table, row, on_conflict="id"):
-    if not supabase_enabled():
-        return None
+def _num(x):
     try:
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={on_conflict}",
-            json=row, headers=supabase_headers(), timeout=SUPABASE_TIMEOUT
-        )
-        if r.status_code not in (200, 201):
-            print(f"⚠️ Supabase {table} write failed: HTTP {r.status_code} {r.text[:300]}")
-            return None
-        return r.json() if r.text else []
-    except requests.RequestException as exc:
-        print(f"⚠️ Supabase {table} write failed: {exc}")
+        v=float(x)
+        return v if math.isfinite(v) else None
+    except (TypeError, ValueError):
         return None
 
-def supabase_select(table, limit=200, asset=None):
-    if not supabase_enabled():
-        return None
-    try:
-        params = {
-            "select": "*",
-            "order": "timestamp_utc.desc",
-            "limit": str(max(1, min(int(limit), 500))),
-        }
+SIGNAL_RETENTION_DAYS = 7
+ENGINE_HISTORY_RETENTION_DAYS = 7
+
+def db_conn():
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_storage():
+    with DB_LOCK:
+        conn = db_conn()
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS signals (
+            id TEXT PRIMARY KEY, asset TEXT NOT NULL, direction TEXT, score REAL,
+            timestamp_utc TEXT, payload TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_bot_signals_asset_time ON signals(asset, timestamp_utc);
+        CREATE TABLE IF NOT EXISTS engine_history (
+            id TEXT PRIMARY KEY, asset TEXT NOT NULL, timestamp_utc TEXT,
+            payload TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_bot_history_asset_time ON engine_history(asset, timestamp_utc);
+        """)
+        conn.commit(); conn.close()
+
+def persistent_upsert(table, item):
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    payload = json.dumps(item, separators=(",", ":"), default=str)
+    with DB_LOCK:
+        conn = db_conn()
+        if table == "signals":
+            conn.execute("""INSERT OR REPLACE INTO signals
+                (id,asset,direction,score,timestamp_utc,payload,created_at)
+                VALUES(?,?,?,?,?,?,?)""",
+                (str(item.get("id")), str(item.get("asset","UNKNOWN")),
+                 str(item.get("direction","")), float(item.get("score",0) or 0),
+                 str(item.get("timestamp_utc", now)), payload, now))
+        else:
+            conn.execute("""INSERT OR REPLACE INTO engine_history
+                (id,asset,timestamp_utc,payload,created_at) VALUES(?,?,?,?,?)""",
+                (str(item.get("id")), str(item.get("asset","UNKNOWN")),
+                 str(item.get("timestamp_utc", now)), payload, now))
+        conn.commit(); conn.close()
+
+def persistent_select(table, limit=200, asset=None):
+    with DB_LOCK:
+        conn = db_conn()
+        where = ""; params=[]
         if asset:
-            params["asset"] = f"eq.{asset.upper()}"
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/{table}",
-            params=params, headers=supabase_headers(), timeout=SUPABASE_TIMEOUT
-        )
-        if r.status_code != 200:
-            print(f"⚠️ Supabase {table} read failed: HTTP {r.status_code} {r.text[:300]}")
-            return None
-        return r.json()
-    except requests.RequestException as exc:
-        print(f"⚠️ Supabase {table} read failed: {exc}")
-        return None
+            where = " WHERE asset=?"; params.append(asset.upper())
+        rows = conn.execute(f"SELECT payload FROM {table}{where} ORDER BY timestamp_utc DESC LIMIT ?", params+[max(1,min(int(limit),500))]).fetchall()
+        conn.close()
+    out=[]
+    for row in rows:
+        try: out.append(json.loads(row["payload"]))
+        except Exception: pass
+    return out
 
-def supabase_cleanup(table, retention_days, max_items=None):
-    if not supabase_enabled():
-        return
-    cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=retention_days)).isoformat()
-    try:
-        r = requests.delete(
-            f"{SUPABASE_URL}/rest/v1/{table}",
-            params={"timestamp_utc": f"lt.{cutoff}"},
-            headers=supabase_headers(), timeout=SUPABASE_TIMEOUT
-        )
-        if r.status_code not in (200, 204):
-            print(f"⚠️ Supabase cleanup failed for {table}: HTTP {r.status_code}")
-    except requests.RequestException as exc:
-        print(f"⚠️ Supabase cleanup failed for {table}: {exc}")
+def persistent_cleanup(table, retention_days):
+    cutoff=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=retention_days)).isoformat()
+    col="timestamp_utc"
+    with DB_LOCK:
+        conn=db_conn(); conn.execute(f"DELETE FROM {table} WHERE {col} < ?",(cutoff,)); conn.commit(); conn.close()
 
+init_storage()
 
 # ============================================================
 # KETS STRATEGY ENGINE
@@ -153,9 +168,10 @@ KETS_SIGNAL_SOURCE_URL = os.environ.get(
     "KETS_SIGNAL_SOURCE_URL",
     "https://kets.onrender.com/api/signals"
 )
-KETS_SIGNAL_SOURCE_KEY = os.environ.get(
-    "KETS_SIGNAL_SOURCE_KEY",
-    API_KEY
+KETS_SIGNAL_SOURCE_KEY = (
+    os.environ.get("KETS_SIGNAL_SOURCE_KEY")
+    or API_KEY
+    or ""
 ).strip()
 
 def send_signal_to_kets_website(api_signal):
@@ -325,10 +341,9 @@ def save_engine_history(
     with engine_history_lock:
         engine_history.append(item)
 
-    # Permanent copy in Supabase. Local memory remains a fast fallback/cache.
-    supabase_upsert("engine_history", item)
+    persistent_upsert("engine_history", item)
     clean_old_engine_history()
-    supabase_cleanup("engine_history", ENGINE_HISTORY_RETENTION_DAYS)
+    persistent_cleanup("engine_history", ENGINE_HISTORY_RETENTION_DAYS)
     return item
 
 
@@ -410,6 +425,12 @@ def save_signal_for_api(
         "classification":
             signal["classification"],
 
+        "entry_quality_score": signal.get("entry_quality_score"),
+        "entry_quality_status": signal.get("entry_quality_status"),
+        "entry_quality_reversal": signal.get("entry_quality_reversal"),
+        "entry_quality_reasons": signal.get("entry_quality_reasons", []),
+        "entry_quality_details": signal.get("entry_quality_details", {}),
+
         "interpretation":
             signal["interpretation"],
 
@@ -429,10 +450,9 @@ def save_signal_for_api(
     with signal_lock:
         signal_history.append(api_signal)
 
-    # Permanent copy in Supabase. Local memory remains a fast fallback/cache.
-    supabase_upsert("signals", api_signal)
+    persistent_upsert("signals", api_signal)
     clean_old_signals()
-    supabase_cleanup("signals", SIGNAL_RETENTION_DAYS)
+    persistent_cleanup("signals", SIGNAL_RETENTION_DAYS)
 
     return api_signal
 
@@ -473,8 +493,8 @@ def api_health():
         "engine_history":
             "online",
 
-        "supabase":
-            "connected" if supabase_enabled() else "not_configured"
+        "storage": "render_persistent_disk",
+        "storage_path": DB_PATH
 
     })
 
@@ -509,9 +529,9 @@ def api_receive_signal():
         if payload.get("id") not in existing_ids:
             signal_history.append(payload)
 
-    supabase_upsert("signals", payload)
+    persistent_upsert("signals", payload)
     clean_old_signals()
-    supabase_cleanup("signals", SIGNAL_RETENTION_DAYS)
+    persistent_cleanup("signals", SIGNAL_RETENTION_DAYS)
 
     print(
         f"📥 WEBSITE SIGNAL RECEIVED: "
@@ -553,29 +573,18 @@ def api_signals():
         "asset"
     )
 
-    db_signals = supabase_select("signals", limit=200, asset=asset) if supabase_enabled() else None
-    if db_signals is not None:
-        signals = db_signals
-    else:
+    signals = persistent_select("signals", limit=200, asset=asset)
+    if not signals:
         with signal_lock:
-            signals = list(signal_history)
+            signals = list(reversed(signal_history))
 
     if asset:
-
         signals = [
-
-            signal
-
-            for signal in signals
-
-            if signal["asset"].upper()
-            == asset.upper()
-
+            signal for signal in signals
+            if str(signal.get("asset", "")).upper() == asset.upper()
         ]
 
-    signals = list(
-        reversed(signals)
-    )[:limit]
+    signals = signals[:limit]
 
     return jsonify({
 
@@ -604,20 +613,18 @@ def api_engine_history():
     limit = max(1, min(limit, 500))
     asset = request.args.get("asset")
 
-    db_history = supabase_select("engine_history", limit=500, asset=asset) if supabase_enabled() else None
-    if db_history is not None:
-        history = db_history
-    else:
+    history = persistent_select("engine_history", limit=500, asset=asset)
+    if not history:
         with engine_history_lock:
-            history = list(engine_history)
+            history = list(reversed(engine_history))
 
     if asset:
         history = [
             item for item in history
-            if item.get("asset", "").upper() == asset.upper()
+            if str(item.get("asset", "")).upper() == asset.upper()
         ]
 
-    history = list(reversed(history))[:limit]
+    history = history[:limit]
 
     return jsonify({
         "status": "success",
@@ -638,32 +645,16 @@ def api_asset_signals(asset):
 
     clean_old_signals()
 
-    db_signals = supabase_select("signals", limit=200, asset=asset) if supabase_enabled() else None
-    if db_signals is not None:
-        signals = db_signals
-    else:
+    signals = persistent_select("signals", limit=200, asset=asset)
+    if not signals:
         with signal_lock:
-            signals = [
-                signal for signal in signal_history
-                if signal.get("asset", "").upper() == asset.upper()
-            ]
+            signals = [signal for signal in reversed(signal_history) if str(signal.get("asset", "")).upper() == asset.upper()]
 
     return jsonify({
-
-        "status":
-            "success",
-
-        "asset":
-            asset.upper(),
-
-        "count":
-            len(signals),
-
-        "signals":
-            list(
-                reversed(signals)
-            )
-
+        "status": "success",
+        "asset": asset.upper(),
+        "count": len(signals),
+        "signals": signals,
     })
 
 
@@ -836,7 +827,7 @@ def trading_hours_open():
 # MARKET SELECTION
 #
 # MONDAY-FRIDAY:
-# BTC + GOLD
+# GOLD ONLY
 #
 # SATURDAY-SUNDAY:
 # BTC ONLY
@@ -2528,6 +2519,38 @@ def calculate_entry_quality(
     else:
         status = "LOW QUALITY ENTRY"
 
+    # Full entry-quality telemetry for the dashboard. These are the actual
+    # figures used by the quality layer; they do not change the strategy score.
+    last_candle = candles[-1] if candles else {}
+    previous_candle_for_quality = candles[-2] if len(candles) >= 2 else {}
+    quality_range = (_num(last_candle.get("high")) - _num(last_candle.get("low"))) if last_candle else 0
+    close_position = ((_num(last_candle.get("close")) - _num(last_candle.get("low"))) / quality_range) if quality_range and quality_range > 0 else None
+    current_volume = _num(last_candle.get("volume")) if last_candle else None
+    volume_ratio = None
+    if current_volume is not None:
+        previous_vols = [v for v in volumes[-21:-1] if isinstance(v, (int,float)) and math.isfinite(v) and v > 0]
+        if previous_vols:
+            avg_vol = sum(previous_vols) / len(previous_vols)
+            if avg_vol > 0: volume_ratio = current_volume / avg_vol
+    breakout = ((signal_type == "BUY" and _num(last_candle.get("close")) > _num(previous_candle_for_quality.get("high"))) or
+                (signal_type == "SELL" and _num(last_candle.get("close")) < _num(previous_candle_for_quality.get("low")))) if previous_candle_for_quality else False
+    retest = any("Breakout retest held" in r for r in reasons)
+    vwap_aligned_value = ((signal_type == "BUY" and current_price > vwap) or (signal_type == "SELL" and current_price < vwap)) if vwap is not None else None
+    entry_quality_details = {
+        "score": quality_score, "status": status, "signal_direction": signal_type,
+        "higher_timeframes": {"5m": direction_5m, "15m": direction_15m},
+        "ema": {"ema9": ema9, "ema20": ema20, "ema50": ema50, "price": current_price, "structure_aligned": bool(ema_structure)},
+        "trend": {"adx": adx, "previous_adx": previous_adx, "plus_di": plus_di, "minus_di": minus_di, "adx_rising": bool(adx_rising), "di_aligned": bool(trend_direction_ok)},
+        "volume": {"current": current_volume, "average_20": (current_volume / volume_ratio if volume_ratio else None), "ratio": volume_ratio, "available": volume_ratio is not None},
+        "candle": {"open": _num(last_candle.get("open")), "high": _num(last_candle.get("high")), "low": _num(last_candle.get("low")), "close": _num(last_candle.get("close")), "range": quality_range or None, "close_position": close_position, "direction": candle_info.get("direction"), "strength": candle_info.get("strength"), "breakout": bool(breakout)},
+        "momentum": {"direction": momentum.get("direction"), "state": momentum.get("state"), "aligned": bool(momentum_aligned)},
+        "vwap": {"value": vwap, "aligned": vwap_aligned_value, "available": vwap is not None},
+        "extension": {**extension, "extended": bool(extension.get("extended", False))},
+        "breakout_retest": {"held": bool(retest)},
+        "reversal": {"clear_reversal": bool(clear_reversal), "opposite_candle": bool(opposite_candle), "opposite_momentum": bool(opposite_momentum)},
+        "reasons": reasons,
+    }
+
     return {
         "score": quality_score,
         "status": status,
@@ -2536,6 +2559,7 @@ def calculate_entry_quality(
         "ema50": ema50,
         "adx_rising": adx_rising,
         "previous_adx": previous_adx,
+        "details": entry_quality_details,
         "reasons": reasons
     }
 
@@ -3357,9 +3381,10 @@ def analyze_market(
     # ========================================================
     # ENTRY QUALITY
     #
-    # ADDITIVE SAFETY LAYER:
-    # Existing strategy score remains unchanged. For 90+ setups,
-    # the current entry must also pass this quality layer.
+    # ENTRY QUALITY IS INFORMATIONAL:
+    # The 0-100 score is calculated and displayed for every analyzed setup,
+    # including lower scores such as 40/100 and 50/100. It is not restricted
+    # to 90+ setups and does not hide lower-quality readings from the dashboard.
     # ========================================================
 
     entry_quality = calculate_entry_quality(
@@ -3755,23 +3780,9 @@ def analyze_market(
         )
     )
 
-    # A 90+ final strategy score is NOT enough by itself.
-    # Clear reversal or excessive extension vetoes a 90+ entry.
-    if (
-        score >= 90
-        and (
-            entry_quality_score < 80
-            or entry_quality["clear_reversal"]
-            or extended
-        )
-    ):
-        print(
-            f"⚠️ {asset_name}: "
-            f"90+ setup rejected by entry-quality filter "
-            f"({entry_quality_score}/100, "
-            f"{entry_quality_status})"
-        )
-        return None
+    # Entry Quality is displayed for every qualifying KETS setup.
+    # It is NOT a 90+ filter: lower readings (40/100, 50/100, etc.)
+    # remain visible so the user can see the actual entry conditions.
 
     # ========================================================
     # SETUP CLASSIFICATION
@@ -4347,7 +4358,9 @@ def analyze_market(
 
         "entry_quality_reasons": entry_quality_reasons,
 
-        "entry_quality_required": bool(score >= 90),
+        "entry_quality_details": entry_quality.get("details", {}),
+
+        "entry_quality_required": False,
 
         "entry_quality_passed": bool(entry_quality_score >= 80),
 
@@ -4539,7 +4552,7 @@ def run_strategy():
     )
 
     print(
-        "📅 Weekdays: BTC + GOLD"
+        "📅 Weekdays: GOLD ONLY"
     )
 
     print(

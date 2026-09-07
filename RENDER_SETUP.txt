@@ -1,0 +1,7 @@
+KETS TRADING BOT - FINAL
+- Scanner/timeframe: 1 minute
+- Weekdays: GOLD only
+- Weekend: BTC only
+- Storage: Render Persistent Disk at /var/data/kets_bot.db
+- KETS strategy preserved: EMA 9/26, RSI14, MACD12/26/9, candle structure, early-entry scoring, ADX, ATR, 5M/15M context, S/R, momentum, candle quality, VWAP, regime, data quality, overextension.
+- Entry-quality telemetry is sent to the website, including the numeric score (0-100) and all component figures.
