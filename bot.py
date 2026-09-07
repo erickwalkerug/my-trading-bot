@@ -871,10 +871,9 @@ def get_markets():
             "BTC": "BTC/USD"
         }
 
-    # Monday-Friday: Gold + Bitcoin
+    # Monday-Friday: Gold only
     return {
-        "GOLD": "XAU/USD",
-        "BTC": "BTC/USD"
+        "GOLD": "XAU/USD"
     }
 
 
@@ -4427,7 +4426,7 @@ def build_startup_messages():
         "⏰ Trading hours: "
         "06:00 AM - 06:00 PM EAT\n"
 
-        "💰 Monday-Friday: GOLD + BTC\n"
+        "💰 Monday-Friday: GOLD ONLY\n"
 
         "₿ Saturday-Sunday: BTC ONLY\n"
 
@@ -4480,7 +4479,7 @@ def build_startup_messages():
 
         "⏰ Active: 06:00-18:00 EAT\n"
 
-        "💰 Monday-Friday: GOLD + BTC\n"
+        "💰 Monday-Friday: GOLD ONLY\n"
 
         "₿ Saturday-Sunday: BTC ONLY\n"
 
@@ -4579,7 +4578,7 @@ def run_strategy():
     )
 
     print(
-        "📅 Weekdays: GOLD + BTC"
+        "📅 Weekdays: GOLD ONLY"
     )
 
     print(
@@ -4677,7 +4676,7 @@ def run_strategy():
             else:
 
                 print(
-                    "💰 Weekday mode: GOLD + BTC"
+                    "💰 Weekday mode: GOLD ONLY"
                 )
 
             bot_updates = []
