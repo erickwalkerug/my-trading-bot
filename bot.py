@@ -225,6 +225,7 @@ def send_signal_to_kets_website(api_signal):
                 f"✅ KETS website received signal "
                 f"{api_signal.get('id')} "
                 f"(HTTP {response.status_code})"
+                f"{' — STRONG REVERSAL ENTRY / HIGH QUALITY ENTRY' if api_signal.get('strong_reversal_entry') else ''}"
             )
             return True
 
@@ -455,6 +456,13 @@ def save_signal_for_api(
         "entry_quality_reversal": signal.get("entry_quality_reversal"),
         "entry_quality_reasons": signal.get("entry_quality_reasons", []),
         "entry_quality_details": signal.get("entry_quality_details", {}),
+
+        "strong_reversal_entry": bool(signal.get("reversal_signal", False)),
+        "signal_label": signal.get("signal_label"),
+        "website_display": signal.get("website_display"),
+        "reversal_reasons": signal.get("reversal_reasons", []),
+        "telegram_bot_message": signal.get("telegram_bot_message"),
+        "telegram_channel_message": signal.get("telegram_channel_message"),
 
         "interpretation":
             signal["interpretation"],
@@ -4461,6 +4469,15 @@ def analyze_market(
         "reversal_signal": bool(reversal_signal),
         "signal_type": "STRONG REVERSAL" if reversal_signal else "TREND CONTINUATION",
         "reversal_reasons": reversal.get("reasons", []) if reversal_signal else [],
+
+        # Explicit website-facing strong-reversal fields.
+        # These are additive and do not change the existing strategy logic.
+        "strong_reversal_entry": bool(reversal_signal),
+        "signal_label": signal_label,
+        "website_display": "HIGH QUALITY ENTRY" if reversal_signal else "STANDARD ENTRY",
+        "telegram_bot_message": bot_message,
+        "telegram_channel_message": channel_message,
+
         "timestamp":
             timestamp
 
