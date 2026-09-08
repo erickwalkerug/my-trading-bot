@@ -2844,6 +2844,58 @@ last_signal = {}
 # ANALYZE MARKET
 # ============================================================
 
+# ============================================================
+# STRONG REVERSAL ENTRY DETECTOR
+# ============================================================
+def detect_strong_reversal(candles, current_price, ema9, ema26, previous_ema9, previous_ema26, rsi, previous_rsi, bullish_cross, bearish_cross, recent_bullish_cross, recent_bearish_cross, momentum, candle_info, adx, plus_di, minus_di, direction_5m, direction_15m):
+    if len(candles) < 6:
+        return None
+    current, previous = candles[-1], candles[-2]
+    closes = [c["close"] for c in candles]
+    prior_bearish = closes[-4] > closes[-3] > closes[-2] or current_price < closes[-4]
+    prior_bullish = closes[-4] < closes[-3] < closes[-2] or current_price > closes[-4]
+    bullish_body = candle_info.get("direction") == "BULLISH" and candle_info.get("strength", 0) >= 60
+    bearish_body = candle_info.get("direction") == "BEARISH" and candle_info.get("strength", 0) >= 60
+    bullish_break = current["close"] > previous["high"]
+    bearish_break = current["close"] < previous["low"]
+    bullish_momentum = momentum.get("direction") == "BULLISH" and momentum.get("state") in ("ACCELERATING", "STABLE")
+    bearish_momentum = momentum.get("direction") == "BEARISH" and momentum.get("state") in ("ACCELERATING", "STABLE")
+    bullish_rsi_turn = rsi > previous_rsi and (previous_rsi <= 45 or rsi <= 55)
+    bearish_rsi_turn = rsi < previous_rsi and (previous_rsi >= 55 or rsi >= 45)
+    bullish_ema_turn = ema9 > ema26 or (previous_ema9 <= previous_ema26 and ema9 > previous_ema9)
+    bearish_ema_turn = ema9 < ema26 or (previous_ema9 >= previous_ema26 and ema9 < previous_ema9)
+    bullish_macd_turn = bullish_cross or recent_bullish_cross or (bullish_momentum and current_price > ema9)
+    bearish_macd_turn = bearish_cross or recent_bearish_cross or (bearish_momentum and current_price < ema9)
+    bullish_di = plus_di > minus_di
+    bearish_di = minus_di > plus_di
+    bull_checks = [bullish_body, bullish_break, bullish_momentum, bullish_rsi_turn, bullish_ema_turn, bullish_macd_turn, bullish_di, prior_bearish]
+    bear_checks = [bearish_body, bearish_break, bearish_momentum, bearish_rsi_turn, bearish_ema_turn, bearish_macd_turn, bearish_di, prior_bullish]
+    bull_count, bear_count = sum(bull_checks), sum(bear_checks)
+    if bull_count >= 6 and bullish_body and bullish_momentum and bullish_break:
+        reasons = []
+        if prior_bearish: reasons.append("Previous bearish pressure detected")
+        if bullish_body: reasons.append("Strong bullish reversal candle")
+        if bullish_break: reasons.append("Break above previous candle high")
+        if bullish_momentum: reasons.append("Bullish momentum turned/accelerated")
+        if bullish_rsi_turn: reasons.append("RSI turned upward")
+        if bullish_ema_turn: reasons.append("EMA direction turning bullish")
+        if bullish_macd_turn: reasons.append("MACD momentum turned bullish")
+        if bullish_di: reasons.append("DI+ moved above DI-")
+        return {"direction": "BUY", "score": min(100, 70 + bull_count * 4), "reasons": reasons}
+    if bear_count >= 6 and bearish_body and bearish_momentum and bearish_break:
+        reasons = []
+        if prior_bullish: reasons.append("Previous bullish pressure detected")
+        if bearish_body: reasons.append("Strong bearish reversal candle")
+        if bearish_break: reasons.append("Break below previous candle low")
+        if bearish_momentum: reasons.append("Bearish momentum turned/accelerated")
+        if bearish_rsi_turn: reasons.append("RSI turned downward")
+        if bearish_ema_turn: reasons.append("EMA direction turning bearish")
+        if bearish_macd_turn: reasons.append("MACD momentum turned bearish")
+        if bearish_di: reasons.append("DI- moved above DI+")
+        return {"direction": "SELL", "score": min(100, 70 + bear_count * 4), "reasons": reasons}
+    return None
+
+
 def analyze_market(
     asset_name,
     symbol,
@@ -3292,32 +3344,20 @@ def analyze_market(
 
     # ========================================================
     # CURRENT CORE DIRECTION
-    #
-    # EXISTING THRESHOLD PRESERVED:
-    # MINIMUM 55 CORE POINTS.
     # ========================================================
 
-    if (
-        buy_score >= sell_score
-        and buy_score >= 55
-    ):
-
+    if buy_score >= sell_score and buy_score >= 55:
         signal_type = "BUY"
         core_score = buy_score
         reasons = buy_reasons
-
-    elif (
-        sell_score > buy_score
-        and sell_score >= 55
-    ):
-
+    elif sell_score > buy_score and sell_score >= 55:
         signal_type = "SELL"
         core_score = sell_score
         reasons = sell_reasons
-
     else:
-
-        return None
+        signal_type = None
+        core_score = 0
+        reasons = []
 
     # ========================================================
     # ADVANCED INTELLIGENCE
@@ -3379,6 +3419,23 @@ def analyze_market(
             candles_15m
         )
     )
+
+    # ========================================================
+    # STRONG REVERSAL PRIORITY
+    # ========================================================
+    reversal = detect_strong_reversal(
+        candles, current_price, ema9, ema26, previous_ema9, previous_ema26,
+        rsi, previous_rsi, bullish_cross, bearish_cross,
+        recent_bullish_cross, recent_bearish_cross, momentum, candle_info,
+        adx, plus_di, minus_di, direction_5m, direction_15m
+    )
+    reversal_signal = reversal is not None
+    if reversal_signal:
+        signal_type = reversal["direction"]
+        core_score = reversal["score"]
+        reasons = reversal["reasons"]
+    elif signal_type is None:
+        return None
 
     # ========================================================
     # MARKET REGIME
@@ -3828,6 +3885,12 @@ def analyze_market(
         )
     )
 
+    if reversal_signal:
+        classification = "🔥 STRONG REVERSAL ENTRY"
+        interpretation = "🔥 NEW STRONG REVERSAL — price action, momentum and structure are turning together."
+        if entry_quality_score < 65:
+            entry_quality_status = "REVERSAL — DEVELOPING CONFIRMATION"
+
     # ========================================================
     # ENTRY
     # ========================================================
@@ -4115,10 +4178,12 @@ def analyze_market(
     # FULL INFORMATION
     # ========================================================
 
+    signal_label = "STRONG REVERSAL ENTRY" if reversal_signal else "EARLY ENTRY SIGNAL"
+
     bot_message = (
 
         f"🤖 *KETS — "
-        f"EARLY ENTRY SIGNAL — "
+        f"{signal_label} — "
         f"{asset_name}*\n"
 
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -4285,7 +4350,7 @@ def analyze_market(
     channel_message = (
 
         f"🤖 *KETS — "
-        f"EARLY ENTRY SIGNAL — "
+        f"{signal_label} — "
         f"{asset_name}*\n"
 
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -4393,6 +4458,9 @@ def analyze_market(
         "entry_quality_score": entry_quality_score,
 
         "entry_quality_status": entry_quality_status,
+        "reversal_signal": bool(reversal_signal),
+        "signal_type": "STRONG REVERSAL" if reversal_signal else "TREND CONTINUATION",
+        "reversal_reasons": reversal.get("reasons", []) if reversal_signal else [],
         "timestamp":
             timestamp
 
