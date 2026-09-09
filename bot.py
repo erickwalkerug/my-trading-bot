@@ -189,33 +189,19 @@ API_KEY = os.environ.get("KETS_API_KEY")
 # Sends every newly generated signal directly to the KETS
 # website/API. Configure these in Render environment variables.
 # ============================================================
-KETS_SIGNAL_SOURCE_URL = (
-    os.environ.get("KETS_SIGNAL_SOURCE_URL")
-    or os.environ.get("KETS_WEBSITE_URL")
-    or "https://kets.onrender.com/api/signals"
-).strip().rstrip("/")
+KETS_SIGNAL_SOURCE_URL = os.environ.get(
+    "KETS_SIGNAL_SOURCE_URL",
+    "https://kets.onrender.com/api/signals"
+)
 KETS_SIGNAL_SOURCE_KEY = (
     os.environ.get("KETS_SIGNAL_SOURCE_KEY")
-    or os.environ.get("KETS_SIGNAL_RECEIVER_KEY")
     or API_KEY
     or ""
 ).strip()
 
-def _website_signal_endpoint(url):
-    """Accept either the full /api/signals URL or the website base URL."""
-    url=(url or "").strip().rstrip("/")
-    if not url:
-        return ""
-    if url.endswith("/api/signals"):
-        return url
-    if url.endswith("/api"):
-        return url + "/signals"
-    return url + "/api/signals"
-
 def send_signal_to_kets_website(api_signal):
-    """POST a generated signal to the KETS website with short retries."""
-    endpoint=_website_signal_endpoint(KETS_SIGNAL_SOURCE_URL)
-    if not endpoint:
+    """POST a generated signal to the KETS website."""
+    if not KETS_SIGNAL_SOURCE_URL:
         print("⚠️ KETS website URL is missing; signal not sent.")
         return False
 
@@ -223,27 +209,40 @@ def send_signal_to_kets_website(api_signal):
         print("⚠️ KETS website API key is missing; signal not sent.")
         return False
 
-    headers={
-        "X-KETS-API-KEY": KETS_SIGNAL_SOURCE_KEY,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    last_error="unknown error"
-    for attempt in range(1,4):
-        try:
-            response=requests.post(endpoint, json=api_signal, headers=headers, timeout=12)
-            if 200 <= response.status_code < 300:
-                print(f"✅ KETS website received signal {api_signal.get('id')} (HTTP {response.status_code}, attempt {attempt})")
-                return True
-            last_error=f"HTTP {response.status_code}: {response.text[:300]}"
-            if response.status_code not in (408,409,425,429) and response.status_code < 500:
-                break
-        except requests.RequestException as exc:
-            last_error=str(exc)
-        if attempt < 3:
-            time.sleep(1.5 * attempt)
-    print(f"❌ KETS website signal delivery failed for {api_signal.get('id')}: {last_error}")
-    return False
+    try:
+        response = requests.post(
+            KETS_SIGNAL_SOURCE_URL,
+            json=api_signal,
+            headers={
+                "X-KETS-API-KEY": KETS_SIGNAL_SOURCE_KEY.strip(),
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+
+        if 200 <= response.status_code < 300:
+            print(
+                f"✅ KETS website received signal "
+                f"{api_signal.get('id')} "
+                f"(HTTP {response.status_code})"
+                f"{' — STRONG REVERSAL ENTRY / HIGH QUALITY ENTRY' if api_signal.get('strong_reversal_entry') else ''}"
+            )
+            return True
+
+        print(
+            f"❌ KETS website rejected signal "
+            f"{api_signal.get('id')}: "
+            f"HTTP {response.status_code} "
+            f"{response.text[:300]}"
+        )
+        return False
+
+    except requests.RequestException as exc:
+        print(
+            f"❌ KETS website signal delivery failed: "
+            f"{exc}"
+        )
+        return False
 
 
 signal_history = []
@@ -579,26 +578,6 @@ def api_receive_signal():
         "message": "Signal received",
         "id": payload.get("id")
     }), 201
-
-@app.route("/api/source/signals")
-def api_source_signals():
-    """Private machine-to-machine source feed used by the KETS website bridge."""
-    if not check_api_key():
-        return jsonify({"error": "Unauthorized"}), 401
-    clean_old_signals()
-    signals=persistent_select("signals", limit=200)
-    if not signals:
-        with signal_lock:
-            signals=list(reversed(signal_history))
-    latest={}
-    history=[]
-    for item in signals:
-        asset=str(item.get("asset") or item.get("market") or "").upper()
-        if not asset: continue
-        latest[asset]=item
-        history.append(item)
-    return jsonify({"ok":True,"signals":latest,"history":history[-200:],"markets":list(get_markets().keys())})
-
 
 @app.route("/api/signals")
 def api_signals():
@@ -2910,7 +2889,7 @@ def detect_strong_reversal(candles, current_price, ema9, ema26, previous_ema9, p
         if bullish_ema_turn: reasons.append("EMA direction turning bullish")
         if bullish_macd_turn: reasons.append("MACD momentum turned bullish")
         if bullish_di: reasons.append("DI+ moved above DI-")
-        return {"direction": "BUY", "score": min(100, 70 + bull_count * 4), "reasons": reasons, "evidence_count": bull_count, "evidence_total": len(bull_checks)}
+        return {"direction": "BUY", "score": min(100, 70 + bull_count * 4), "reasons": reasons}
     if bear_count >= 6 and bearish_body and bearish_momentum and bearish_break:
         reasons = []
         if prior_bullish: reasons.append("Previous bullish pressure detected")
@@ -2921,7 +2900,7 @@ def detect_strong_reversal(candles, current_price, ema9, ema26, previous_ema9, p
         if bearish_ema_turn: reasons.append("EMA direction turning bearish")
         if bearish_macd_turn: reasons.append("MACD momentum turned bearish")
         if bearish_di: reasons.append("DI- moved above DI+")
-        return {"direction": "SELL", "score": min(100, 70 + bear_count * 4), "reasons": reasons, "evidence_count": bear_count, "evidence_total": len(bear_checks)}
+        return {"direction": "SELL", "score": min(100, 70 + bear_count * 4), "reasons": reasons}
     return None
 
 
@@ -4490,38 +4469,12 @@ def analyze_market(
         "reversal_signal": bool(reversal_signal),
         "signal_type": "STRONG REVERSAL" if reversal_signal else "TREND CONTINUATION",
         "reversal_reasons": reversal.get("reasons", []) if reversal_signal else [],
-        "reversal_evidence_count": reversal.get("evidence_count") if reversal_signal else 0,
-        "reversal_evidence_total": reversal.get("evidence_total", 8) if reversal_signal else 8,
 
         # Explicit website-facing strong-reversal fields.
         # These are additive and do not change the existing strategy logic.
         "strong_reversal_entry": bool(reversal_signal),
         "signal_label": signal_label,
         "website_display": "HIGH QUALITY ENTRY" if reversal_signal else "STANDARD ENTRY",
-
-        # Explicit dashboard telemetry. These mirror the values already used
-        # by the strategy so the website never has to infer them from text.
-        "ema9": ema9,
-        "ema26": ema26,
-        "rsi": rsi,
-        "macd": curr_macd,
-        "macd_signal": curr_signal,
-        "macd_status": macd_status,
-        "market_regime": regime,
-        "adx": adx,
-        "previous_adx": previous_adx,
-        "di_plus": plus_di,
-        "di_minus": minus_di,
-        "atr": atr,
-        "momentum_direction": momentum.get("direction"),
-        "momentum_state": momentum.get("state"),
-        "candle_quality": candle_info.get("quality", candle_info.get("strength")),
-        "timeframe_5m": direction_5m,
-        "timeframe_15m": direction_15m,
-        "vwap": vwap,
-        "support": support,
-        "resistance": resistance,
-        "advanced_intelligence": advanced_reasons,
         "telegram_bot_message": bot_message,
         "telegram_channel_message": channel_message,
 

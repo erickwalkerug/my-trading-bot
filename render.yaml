@@ -14,7 +14,5 @@ services:
         sync: false
       - key: KETS_SIGNAL_SOURCE_URL
         value: https://kets.onrender.com/api/signals
-      - key: KETS_WEBSITE_URL
-        value: https://kets.onrender.com
       - key: KETS_SIGNAL_SOURCE_KEY
         sync: false
