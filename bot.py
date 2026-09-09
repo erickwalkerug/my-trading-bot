@@ -189,19 +189,33 @@ API_KEY = os.environ.get("KETS_API_KEY")
 # Sends every newly generated signal directly to the KETS
 # website/API. Configure these in Render environment variables.
 # ============================================================
-KETS_SIGNAL_SOURCE_URL = os.environ.get(
-    "KETS_SIGNAL_SOURCE_URL",
-    "https://kets.onrender.com/api/signals"
-)
+KETS_SIGNAL_SOURCE_URL = (
+    os.environ.get("KETS_SIGNAL_SOURCE_URL")
+    or os.environ.get("KETS_WEBSITE_URL")
+    or "https://kets.onrender.com/api/signals"
+).strip().rstrip("/")
 KETS_SIGNAL_SOURCE_KEY = (
     os.environ.get("KETS_SIGNAL_SOURCE_KEY")
+    or os.environ.get("KETS_SIGNAL_RECEIVER_KEY")
     or API_KEY
     or ""
 ).strip()
 
+def _website_signal_endpoint(url):
+    """Accept either the full /api/signals URL or the website base URL."""
+    url=(url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if url.endswith("/api/signals"):
+        return url
+    if url.endswith("/api"):
+        return url + "/signals"
+    return url + "/api/signals"
+
 def send_signal_to_kets_website(api_signal):
-    """POST a generated signal to the KETS website."""
-    if not KETS_SIGNAL_SOURCE_URL:
+    """POST a generated signal to the KETS website with short retries."""
+    endpoint=_website_signal_endpoint(KETS_SIGNAL_SOURCE_URL)
+    if not endpoint:
         print("⚠️ KETS website URL is missing; signal not sent.")
         return False
 
@@ -209,40 +223,27 @@ def send_signal_to_kets_website(api_signal):
         print("⚠️ KETS website API key is missing; signal not sent.")
         return False
 
-    try:
-        response = requests.post(
-            KETS_SIGNAL_SOURCE_URL,
-            json=api_signal,
-            headers={
-                "X-KETS-API-KEY": KETS_SIGNAL_SOURCE_KEY.strip(),
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        )
-
-        if 200 <= response.status_code < 300:
-            print(
-                f"✅ KETS website received signal "
-                f"{api_signal.get('id')} "
-                f"(HTTP {response.status_code})"
-                f"{' — STRONG REVERSAL ENTRY / HIGH QUALITY ENTRY' if api_signal.get('strong_reversal_entry') else ''}"
-            )
-            return True
-
-        print(
-            f"❌ KETS website rejected signal "
-            f"{api_signal.get('id')}: "
-            f"HTTP {response.status_code} "
-            f"{response.text[:300]}"
-        )
-        return False
-
-    except requests.RequestException as exc:
-        print(
-            f"❌ KETS website signal delivery failed: "
-            f"{exc}"
-        )
-        return False
+    headers={
+        "X-KETS-API-KEY": KETS_SIGNAL_SOURCE_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    last_error="unknown error"
+    for attempt in range(1,4):
+        try:
+            response=requests.post(endpoint, json=api_signal, headers=headers, timeout=12)
+            if 200 <= response.status_code < 300:
+                print(f"✅ KETS website received signal {api_signal.get('id')} (HTTP {response.status_code}, attempt {attempt})")
+                return True
+            last_error=f"HTTP {response.status_code}: {response.text[:300]}"
+            if response.status_code not in (408,409,425,429) and response.status_code < 500:
+                break
+        except requests.RequestException as exc:
+            last_error=str(exc)
+        if attempt < 3:
+            time.sleep(1.5 * attempt)
+    print(f"❌ KETS website signal delivery failed for {api_signal.get('id')}: {last_error}")
+    return False
 
 
 signal_history = []
@@ -578,6 +579,26 @@ def api_receive_signal():
         "message": "Signal received",
         "id": payload.get("id")
     }), 201
+
+@app.route("/api/source/signals")
+def api_source_signals():
+    """Private machine-to-machine source feed used by the KETS website bridge."""
+    if not check_api_key():
+        return jsonify({"error": "Unauthorized"}), 401
+    clean_old_signals()
+    signals=persistent_select("signals", limit=200)
+    if not signals:
+        with signal_lock:
+            signals=list(reversed(signal_history))
+    latest={}
+    history=[]
+    for item in signals:
+        asset=str(item.get("asset") or item.get("market") or "").upper()
+        if not asset: continue
+        latest[asset]=item
+        history.append(item)
+    return jsonify({"ok":True,"signals":latest,"history":history[-200:],"markets":list(get_markets().keys())})
+
 
 @app.route("/api/signals")
 def api_signals():
