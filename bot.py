@@ -2889,7 +2889,7 @@ def detect_strong_reversal(candles, current_price, ema9, ema26, previous_ema9, p
         if bullish_ema_turn: reasons.append("EMA direction turning bullish")
         if bullish_macd_turn: reasons.append("MACD momentum turned bullish")
         if bullish_di: reasons.append("DI+ moved above DI-")
-        return {"direction": "BUY", "score": min(100, 70 + bull_count * 4), "reasons": reasons}
+        return {"direction": "BUY", "score": min(100, 70 + bull_count * 4), "reasons": reasons, "evidence_count": bull_count, "evidence_total": len(bull_checks)}
     if bear_count >= 6 and bearish_body and bearish_momentum and bearish_break:
         reasons = []
         if prior_bullish: reasons.append("Previous bullish pressure detected")
@@ -2900,7 +2900,7 @@ def detect_strong_reversal(candles, current_price, ema9, ema26, previous_ema9, p
         if bearish_ema_turn: reasons.append("EMA direction turning bearish")
         if bearish_macd_turn: reasons.append("MACD momentum turned bearish")
         if bearish_di: reasons.append("DI- moved above DI+")
-        return {"direction": "SELL", "score": min(100, 70 + bear_count * 4), "reasons": reasons}
+        return {"direction": "SELL", "score": min(100, 70 + bear_count * 4), "reasons": reasons, "evidence_count": bear_count, "evidence_total": len(bear_checks)}
     return None
 
 
@@ -4469,12 +4469,38 @@ def analyze_market(
         "reversal_signal": bool(reversal_signal),
         "signal_type": "STRONG REVERSAL" if reversal_signal else "TREND CONTINUATION",
         "reversal_reasons": reversal.get("reasons", []) if reversal_signal else [],
+        "reversal_evidence_count": reversal.get("evidence_count") if reversal_signal else 0,
+        "reversal_evidence_total": reversal.get("evidence_total", 8) if reversal_signal else 8,
 
         # Explicit website-facing strong-reversal fields.
         # These are additive and do not change the existing strategy logic.
         "strong_reversal_entry": bool(reversal_signal),
         "signal_label": signal_label,
         "website_display": "HIGH QUALITY ENTRY" if reversal_signal else "STANDARD ENTRY",
+
+        # Explicit dashboard telemetry. These mirror the values already used
+        # by the strategy so the website never has to infer them from text.
+        "ema9": ema9,
+        "ema26": ema26,
+        "rsi": rsi,
+        "macd": curr_macd,
+        "macd_signal": curr_signal,
+        "macd_status": macd_status,
+        "market_regime": regime,
+        "adx": adx,
+        "previous_adx": previous_adx,
+        "di_plus": plus_di,
+        "di_minus": minus_di,
+        "atr": atr,
+        "momentum_direction": momentum.get("direction"),
+        "momentum_state": momentum.get("state"),
+        "candle_quality": candle_info.get("quality", candle_info.get("strength")),
+        "timeframe_5m": direction_5m,
+        "timeframe_15m": direction_15m,
+        "vwap": vwap,
+        "support": support,
+        "resistance": resistance,
+        "advanced_intelligence": advanced_reasons,
         "telegram_bot_message": bot_message,
         "telegram_channel_message": channel_message,
 
