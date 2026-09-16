@@ -1,0 +1,44 @@
+KETS TRADING BOT - FINAL FIX
+
+DEPLOYMENT FIX
+- Fixed Render SQLite startup crash: "sqlite3.OperationalError: unable to open database file".
+- The bot now creates the storage directory and verifies it is writable before opening SQLite.
+- Preferred persistent storage: /var/data when a Render Persistent Disk is actually mounted.
+- If no persistent disk is available (for example on a plan/service without one), the bot safely falls back to /tmp/kets-data so deployment does not crash.
+- Set KETS_DATA_DIR in Render only if you want to explicitly choose another writable directory.
+- Set KETS_DB_PATH only if you want to explicitly choose the SQLite file path.
+
+KETS MARKET/SCAN SETTINGS
+- Scanner/timeframe: 1 minute
+- Scan interval: every 1 minute
+- Monday-Friday: GOLD + BTC
+- Saturday-Sunday: BTC only
+- Trading hours: 06:00-18:00 EAT
+
+KETS STRATEGY PRESERVED
+- EMA 9/26
+- RSI 14
+- MACD 12/26/9
+- Candle structure
+- Early-entry scoring
+- ADX
+- ATR
+- 5M/15M context
+- Support/resistance
+- Momentum
+- Candle quality
+- VWAP
+- Market regime
+- Data quality
+- Overextension protection
+- Signal classification
+
+ENTRY QUALITY
+- Entry-quality score is telemetry/classification, not a 90+ gate.
+- Lower scores such as 40/100 or 50/100 can still be represented in scan/history data.
+- The strategy-alignment score remains separate from win probability.
+
+WEBSITE CONNECTION
+- KETS_SIGNAL_SOURCE_URL points to the website signal endpoint.
+- KETS_SIGNAL_SOURCE_KEY is used as the X-KETS-API-KEY header.
+- Existing website API connection is preserved.
