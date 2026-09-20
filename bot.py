@@ -2904,6 +2904,73 @@ def detect_strong_reversal(candles, current_price, ema9, ema26, previous_ema9, p
     return None
 
 
+
+
+# ============================================================
+# SMC (SMART MONEY CONCEPTS) -- ADDITIVE AUTO-TRADER DATA
+# This module is intentionally separate from the existing KETS strategy.
+# It detects common SMC structure/liquidity/imbalance conditions and adds
+# fields to each signal. It does NOT replace or modify the core signal score.
+# ============================================================
+def detect_smc(candles, direction=None):
+    if len(candles) < 12:
+        return {"confirmed": False, "direction": None, "score": 0, "reasons": [], "components": {}}
+    c = candles
+    highs=[float(x.get("high",0)) for x in c]
+    lows=[float(x.get("low",0)) for x in c]
+    closes=[float(x.get("close",0)) for x in c]
+    # Recent swing points: simple 5-candle pivots.
+    swing_highs=[]; swing_lows=[]
+    for i in range(2, len(c)-2):
+        if highs[i] > highs[i-1] and highs[i] >= highs[i+1] and highs[i] > highs[i-2] and highs[i] >= highs[i+2]: swing_highs.append((i,highs[i]))
+        if lows[i] < lows[i-1] and lows[i] <= lows[i+1] and lows[i] < lows[i-2] and lows[i] <= lows[i+2]: swing_lows.append((i,lows[i]))
+    sh=swing_highs[-3:]; sl=swing_lows[-3:]
+    last=c[-1]; prev=c[-2]
+    recent_high=max([x[1] for x in sh], default=max(highs[-8:-2]))
+    recent_low=min([x[1] for x in sl], default=min(lows[-8:-2]))
+    # Liquidity sweep: wick takes a recent swing, close returns back inside.
+    buy_side_sweep=highs[-1] > recent_high and closes[-1] < recent_high
+    sell_side_sweep=lows[-1] < recent_low and closes[-1] > recent_low
+    # BOS: close breaks the most recent swing level.
+    bullish_bos=closes[-1] > recent_high
+    bearish_bos=closes[-1] < recent_low
+    # FVG: three-candle imbalance.
+    bullish_fvg=lows[-1] > highs[-3]
+    bearish_fvg=highs[-1] < lows[-3]
+    # Order-block proxy: last opposite candle before current displacement.
+    bullish_ob=False; bearish_ob=False
+    if len(c)>=4:
+        bullish_ob=(closes[-3] < float(c[-3].get('open',closes[-3]))) and closes[-1] > highs[-3]
+        bearish_ob=(closes[-3] > float(c[-3].get('open',closes[-3]))) and closes[-1] < lows[-3]
+    # Structure direction from latest two pivots.
+    structure_bull=bool(len(sh)>=2 and len(sl)>=2 and sh[-1][1] >= sh[-2][1] and sl[-1][1] >= sl[-2][1])
+    structure_bear=bool(len(sh)>=2 and len(sl)>=2 and sh[-1][1] <= sh[-2][1] and sl[-1][1] <= sl[-2][1])
+    bull_points=sum([bullish_bos, sell_side_sweep, bullish_fvg, bullish_ob, structure_bull])
+    bear_points=sum([bearish_bos, buy_side_sweep, bearish_fvg, bearish_ob, structure_bear])
+    chosen=(str(direction or '').upper())
+    if chosen=='BUY': points=bull_points; confirmed=points>=2; reasons=[]
+    elif chosen=='SELL': points=bear_points; confirmed=points>=2; reasons=[]
+    else:
+        chosen='BUY' if bull_points>bear_points else ('SELL' if bear_points>bull_points else None)
+        points=max(bull_points,bear_points); confirmed=points>=2; reasons=[]
+    if chosen=='BUY':
+        if bullish_bos: reasons.append('Bullish BOS')
+        if sell_side_sweep: reasons.append('Sell-side liquidity sweep')
+        if bullish_fvg: reasons.append('Bullish FVG')
+        if bullish_ob: reasons.append('Bullish order-block reaction')
+        if structure_bull: reasons.append('Bullish market structure')
+    elif chosen=='SELL':
+        if bearish_bos: reasons.append('Bearish BOS')
+        if buy_side_sweep: reasons.append('Buy-side liquidity sweep')
+        if bearish_fvg: reasons.append('Bearish FVG')
+        if bearish_ob: reasons.append('Bearish order-block reaction')
+        if structure_bear: reasons.append('Bearish market structure')
+    return {
+        'confirmed': bool(confirmed), 'direction': chosen, 'score': int(min(100, points*20)),
+        'reasons': reasons,
+        'components': {'bullish_bos':bool(bullish_bos),'bearish_bos':bool(bearish_bos),'buy_side_sweep':bool(buy_side_sweep),'sell_side_sweep':bool(sell_side_sweep),'bullish_fvg':bool(bullish_fvg),'bearish_fvg':bool(bearish_fvg),'bullish_ob':bool(bullish_ob),'bearish_ob':bool(bearish_ob),'structure_bull':bool(structure_bull),'structure_bear':bool(structure_bear)}
+    }
+
 def analyze_market(
     asset_name,
     symbol,
@@ -3444,6 +3511,10 @@ def analyze_market(
         reasons = reversal["reasons"]
     elif signal_type is None:
         return None
+
+    # SMC is additive: calculate it for Auto-Trader consumption without
+    # changing the existing KETS signal decision.
+    smc = detect_smc(candles, signal_type)
 
     # ========================================================
     # MARKET REGIME
@@ -4477,6 +4548,14 @@ def analyze_market(
         "website_display": "HIGH QUALITY ENTRY" if reversal_signal else "STANDARD ENTRY",
         "telegram_bot_message": bot_message,
         "telegram_channel_message": channel_message,
+
+        # SMC is an additive Auto-Trader feature. It is OFF by default and
+        # does not alter the existing signal strategy.
+        "smc_confirmed": bool(smc.get("confirmed")),
+        "smc_direction": smc.get("direction"),
+        "smc_score": smc.get("score", 0),
+        "smc_reasons": smc.get("reasons", []),
+        "smc_components": smc.get("components", {}),
 
         "timestamp":
             timestamp
