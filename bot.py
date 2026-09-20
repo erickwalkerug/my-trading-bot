@@ -3505,16 +3505,29 @@ def analyze_market(
         adx, plus_di, minus_di, direction_5m, direction_15m
     )
     reversal_signal = reversal is not None
+
+    # SMC is an additive Auto-Trader strategy. It is evaluated independently
+    # of the existing KETS setup. When SMC is OFF in KETS, the website ignores
+    # these SMC confirmations. When SMC is ON, an SMC-confirmed setup can create
+    # an Auto-Trader signal even when the existing KETS strategy has no signal.
+    smc = detect_smc(candles, signal_type)
+    smc_only_signal = False
+
     if reversal_signal:
         signal_type = reversal["direction"]
         core_score = reversal["score"]
         reasons = reversal["reasons"]
     elif signal_type is None:
-        return None
-
-    # SMC is additive: calculate it for Auto-Trader consumption without
-    # changing the existing KETS signal decision.
-    smc = detect_smc(candles, signal_type)
+        if bool(smc.get("confirmed")) and smc.get("direction") in ("BUY", "SELL"):
+            signal_type = smc["direction"]
+            core_score = smc.get("score", 0)
+            reasons = ["SMC AUTO-TRADER ENTRY"] + list(smc.get("reasons") or [])
+            smc_only_signal = True
+        else:
+            return None
+    else:
+        # Existing KETS signal path is unchanged.
+        pass
 
     # ========================================================
     # MARKET REGIME
@@ -4257,7 +4270,7 @@ def analyze_market(
     # FULL INFORMATION
     # ========================================================
 
-    signal_label = "STRONG REVERSAL ENTRY" if reversal_signal else "EARLY ENTRY SIGNAL"
+    signal_label = "SMC AUTO-TRADER ENTRY" if smc_only_signal else ("STRONG REVERSAL ENTRY" if reversal_signal else "EARLY ENTRY SIGNAL")
 
     bot_message = (
 
@@ -4554,6 +4567,8 @@ def analyze_market(
         "smc_confirmed": bool(smc.get("confirmed")),
         "smc_direction": smc.get("direction"),
         "smc_score": smc.get("score", 0),
+        "smc_only_signal": bool(smc_only_signal),
+        "autotrader_only": bool(smc_only_signal),
         "smc_reasons": smc.get("reasons", []),
         "smc_components": smc.get("components", {}),
 

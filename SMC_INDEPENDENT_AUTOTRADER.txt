@@ -1,0 +1,14 @@
+SMC INDEPENDENT AUTO-TRADER
+
+This build keeps the existing KETS strategy unchanged.
+
+SMC is additive and independent:
+- The KETS SMC ON/OFF control remains the gate on the website.
+- With SMC OFF, the existing Auto-Trader behavior is unchanged.
+- With SMC ON, a confirmed SMC setup can create an Auto-Trader signal even when
+  the existing KETS signal setup does not produce a signal.
+- SMC-only signals are marked smc_only_signal=true and autotrader_only=true.
+- Existing manual-trading logic is not replaced by SMC.
+
+The SMC detector uses the existing bot's SMC module (BOS, liquidity sweep,
+FVG, order-block proxy and market-structure checks).
