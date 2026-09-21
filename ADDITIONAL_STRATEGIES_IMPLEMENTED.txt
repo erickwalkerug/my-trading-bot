@@ -1,0 +1,24 @@
+KETS ADDITIONAL STRATEGIES
+===========================
+Implemented as an additive strategy engine in bot.py.
+
+Available independent candidates:
+- Trend Following
+- Breakout
+- Mean Reversion
+- Momentum
+- Price Action
+- Support & Resistance
+- Supply & Demand
+- VWAP
+- Moving Average Cross
+- MACD
+- RSI
+- Bollinger Bands
+- Fibonacci
+- Scalping
+- News / Volatility (measured volatility expansion; no news calendar claim)
+
+The existing KETS core strategy, Strong Reversal and SMC logic are preserved.
+Additional strategies are sent as independent strategy candidates to the KETS
+website. They are OFF by default in the KETS Auto Trader controls.

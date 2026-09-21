@@ -250,6 +250,37 @@ engine_history = []
 signal_lock = Lock()
 engine_history_lock = Lock()
 
+def send_strategy_scan_to_kets(asset, symbol, price, strategy_signals):
+    """Send independent strategy candidates without changing the normal signal feed."""
+    if not KETS_SIGNAL_SOURCE_URL or not KETS_SIGNAL_SOURCE_KEY:
+        return False
+    payload = {
+        "id": f"STRAT-{asset}-{int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000)}",
+        "asset": asset,
+        "symbol": symbol,
+        "market_price": price,
+        "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "strategy_signals": strategy_signals,
+        "available_strategies": list(ADDITIONAL_STRATEGIES.keys()),
+    }
+    # The normal signal endpoint intentionally remains unchanged.
+    url = KETS_SIGNAL_SOURCE_URL.rstrip("/")
+    if url.endswith("/api/signals"):
+        url = url[:-len("/api/signals")] + "/api/strategy-scans"
+    elif not url.endswith("/api/strategy-scans"):
+        url += "/api/strategy-scans"
+    try:
+        r=requests.post(url, json=payload, headers={
+            "X-KETS-API-KEY": KETS_SIGNAL_SOURCE_KEY.strip(),
+            "Content-Type":"application/json"
+        }, timeout=15)
+        if 200 <= r.status_code < 300:
+            return True
+        print(f"⚠️ KETS strategy scan rejected: HTTP {r.status_code} {r.text[:200]}")
+    except requests.RequestException as exc:
+        print(f"⚠️ KETS strategy scan delivery failed: {exc}")
+    return False
+
 SIGNAL_RETENTION_DAYS = 7
 ENGINE_HISTORY_RETENTION_DAYS = 7
 ENGINE_HISTORY_MAX_ITEMS = 2000
@@ -2971,6 +3002,231 @@ def detect_smc(candles, direction=None):
         'components': {'bullish_bos':bool(bullish_bos),'bearish_bos':bool(bearish_bos),'buy_side_sweep':bool(buy_side_sweep),'sell_side_sweep':bool(sell_side_sweep),'bullish_fvg':bool(bullish_fvg),'bearish_fvg':bool(bearish_fvg),'bullish_ob':bool(bullish_ob),'bearish_ob':bool(bearish_ob),'structure_bull':bool(structure_bull),'structure_bear':bool(structure_bear)}
     }
 
+
+# ============================================================
+# ADDITIONAL STRATEGY ENGINE
+# ============================================================
+# These strategies are additive. The existing KETS/Strong-Reversal/SMC
+# signal path remains unchanged. Each strategy produces an independent
+# candidate that KETS Auto-Trader can optionally select.
+ADDITIONAL_STRATEGIES = {
+    "trend_following": "Trend Following",
+    "breakout": "Breakout",
+    "mean_reversion": "Mean Reversion",
+    "momentum": "Momentum",
+    "price_action": "Price Action",
+    "support_resistance": "Support & Resistance",
+    "supply_demand": "Supply & Demand",
+    "vwap": "VWAP",
+    "moving_average_cross": "Moving Average Cross",
+    "macd": "MACD",
+    "rsi": "RSI",
+    "bollinger_bands": "Bollinger Bands",
+    "fibonacci": "Fibonacci",
+    "scalping": "Scalping",
+    "volatility_expansion": "News / Volatility",
+}
+
+def _strategy_result(direction=None, score=0, reasons=None, components=None):
+    return {
+        "confirmed": bool(direction and score >= 60),
+        "direction": direction,
+        "score": int(max(0, min(100, score))),
+        "reasons": reasons or [],
+        "components": components or {},
+    }
+
+def _bbands(closes, period=20, deviations=2.0):
+    if len(closes) < period:
+        return None
+    window = [float(x) for x in closes[-period:]]
+    mean = sum(window) / period
+    variance = sum((x - mean) ** 2 for x in window) / period
+    std = variance ** 0.5
+    return mean, mean + deviations * std, mean - deviations * std
+
+def _atr_series(candles, period=14):
+    if len(candles) < period + 1:
+        return []
+    out=[]
+    for i in range(period, len(candles)):
+        trs=[]
+        for j in range(i-period+1, i+1):
+            cur=candles[j]; prev=candles[j-1]
+            trs.append(max(float(cur["high"])-float(cur["low"]),
+                           abs(float(cur["high"])-float(prev["close"])),
+                           abs(float(cur["low"])-float(prev["close"]))))
+        out.append(sum(trs)/len(trs))
+    return out
+
+def evaluate_additional_strategies(candles, current_price, ema9, ema26, rsi,
+                                   curr_macd, curr_signal, atr, adx, plus_di,
+                                   minus_di, vwap):
+    """Return independent strategy candidates without changing core KETS logic."""
+    c=candles
+    closes=[float(x["close"]) for x in c]
+    highs=[float(x["high"]) for x in c]
+    lows=[float(x["low"]) for x in c]
+    opens=[float(x.get("open", x["close"])) for x in c]
+    results={}
+
+    # Common context.
+    prev_close=closes[-2]
+    prev2_close=closes[-3]
+    bullish_candle=closes[-1] > opens[-1]
+    bearish_candle=closes[-1] < opens[-1]
+    prev_bull=closes[-2] > opens[-2]
+    prev_bear=closes[-2] < opens[-2]
+
+    # 1. Trend Following
+    if ema9 > ema26 and plus_di > minus_di and adx >= 18:
+        results["trend_following"]=_strategy_result("BUY", 75, ["EMA trend bullish","+DI above -DI","ADX confirms trend"])
+    elif ema9 < ema26 and minus_di > plus_di and adx >= 18:
+        results["trend_following"]=_strategy_result("SELL", 75, ["EMA trend bearish","-DI above +DI","ADX confirms trend"])
+    else:
+        results["trend_following"]=_strategy_result()
+
+    # 2. Breakout
+    lookback=min(20,len(c)-1)
+    prior_high=max(highs[-lookback-1:-1]); prior_low=min(lows[-lookback-1:-1])
+    if current_price > prior_high:
+        results["breakout"]=_strategy_result("BUY", 82, ["20-bar high breakout"])
+    elif current_price < prior_low:
+        results["breakout"]=_strategy_result("SELL", 82, ["20-bar low breakout"])
+    else:
+        results["breakout"]=_strategy_result()
+
+    # 3. Mean Reversion
+    bb=_bbands(closes)
+    if bb:
+        mid,upper,lower=bb
+        if current_price <= lower and rsi <= 35:
+            results["mean_reversion"]=_strategy_result("BUY", 78, ["Price at lower Bollinger band","RSI oversold zone"])
+        elif current_price >= upper and rsi >= 65:
+            results["mean_reversion"]=_strategy_result("SELL", 78, ["Price at upper Bollinger band","RSI overbought zone"])
+        else: results["mean_reversion"]=_strategy_result()
+    else: results["mean_reversion"]=_strategy_result()
+
+    # 4. Momentum
+    if curr_macd > curr_signal and current_price > prev_close > prev2_close and rsi >= 52:
+        results["momentum"]=_strategy_result("BUY", 80, ["MACD momentum bullish","3-bar price momentum","RSI above 52"])
+    elif curr_macd < curr_signal and current_price < prev_close < prev2_close and rsi <= 48:
+        results["momentum"]=_strategy_result("SELL", 80, ["MACD momentum bearish","3-bar price momentum","RSI below 48"])
+    else: results["momentum"]=_strategy_result()
+
+    # 5. Price Action
+    body=abs(closes[-1]-opens[-1]); rng=max(1e-12,highs[-1]-lows[-1])
+    lower_wick=min(opens[-1],closes[-1])-lows[-1]
+    upper_wick=highs[-1]-max(opens[-1],closes[-1])
+    bull_engulf=prev_bear and bullish_candle and closes[-1] >= opens[-2] and opens[-1] <= closes[-2]
+    bear_engulf=prev_bull and bearish_candle and opens[-1] >= closes[-2] and closes[-1] <= opens[-2]
+    bull_pin=bullish_candle and lower_wick >= body*2 and lower_wick/rng >= .55
+    bear_pin=bearish_candle and upper_wick >= body*2 and upper_wick/rng >= .55
+    if bull_engulf or bull_pin:
+        results["price_action"]=_strategy_result("BUY", 80, ["Bullish engulfing" if bull_engulf else "Bullish rejection candle"])
+    elif bear_engulf or bear_pin:
+        results["price_action"]=_strategy_result("SELL", 80, ["Bearish engulfing" if bear_engulf else "Bearish rejection candle"])
+    else: results["price_action"]=_strategy_result()
+
+    # 6. Support & Resistance
+    sr_window=min(30,len(c)-1)
+    resistance=max(highs[-sr_window-1:-1]); support=min(lows[-sr_window-1:-1])
+    near_support=current_price <= support + max(atr*.25, abs(current_price)*.0003)
+    near_resistance=current_price >= resistance - max(atr*.25, abs(current_price)*.0003)
+    if near_support and bullish_candle and lower_wick > body:
+        results["support_resistance"]=_strategy_result("BUY", 76, ["Support-area rejection"])
+    elif near_resistance and bearish_candle and upper_wick > body:
+        results["support_resistance"]=_strategy_result("SELL", 76, ["Resistance-area rejection"])
+    else: results["support_resistance"]=_strategy_result()
+
+    # 7. Supply & Demand (zone proxy using recent displacement)
+    recent=c[-6:]
+    base_high=max(float(x["high"]) for x in recent[:-1]); base_low=min(float(x["low"]) for x in recent[:-1])
+    displacement_up=current_price > base_high and bullish_candle
+    displacement_down=current_price < base_low and bearish_candle
+    if displacement_up:
+        results["supply_demand"]=_strategy_result("BUY", 77, ["Demand displacement / upside break"])
+    elif displacement_down:
+        results["supply_demand"]=_strategy_result("SELL", 77, ["Supply displacement / downside break"])
+    else: results["supply_demand"]=_strategy_result()
+
+    # 8. VWAP
+    if vwap is not None:
+        if current_price > vwap and prev_close <= vwap:
+            results["vwap"]=_strategy_result("BUY", 82, ["Price reclaimed VWAP"])
+        elif current_price < vwap and prev_close >= vwap:
+            results["vwap"]=_strategy_result("SELL", 82, ["Price lost VWAP"])
+        elif current_price > vwap and bullish_candle and rsi >= 50:
+            results["vwap"]=_strategy_result("BUY", 65, ["Price above VWAP","Bullish momentum"])
+        elif current_price < vwap and bearish_candle and rsi <= 50:
+            results["vwap"]=_strategy_result("SELL", 65, ["Price below VWAP","Bearish momentum"])
+        else: results["vwap"]=_strategy_result()
+    else: results["vwap"]=_strategy_result()
+
+    # 9. Moving Average Cross
+    prev_ema9=calculate_ema(closes[:-1],9); prev_ema26=calculate_ema(closes[:-1],26)
+    if prev_ema9 <= prev_ema26 and ema9 > ema26:
+        results["moving_average_cross"]=_strategy_result("BUY", 90, ["Fresh EMA9/EMA26 bullish crossover"])
+    elif prev_ema9 >= prev_ema26 and ema9 < ema26:
+        results["moving_average_cross"]=_strategy_result("SELL", 90, ["Fresh EMA9/EMA26 bearish crossover"])
+    else: results["moving_average_cross"]=_strategy_result()
+
+    # 10. MACD
+    if curr_macd > curr_signal and current_price > prev_close:
+        results["macd"]=_strategy_result("BUY", 72, ["MACD above signal","Price rising"])
+    elif curr_macd < curr_signal and current_price < prev_close:
+        results["macd"]=_strategy_result("SELL", 72, ["MACD below signal","Price falling"])
+    else: results["macd"]=_strategy_result()
+
+    # 11. RSI
+    if rsi <= 30 and bullish_candle:
+        results["rsi"]=_strategy_result("BUY", 78, ["RSI oversold","Bullish candle"])
+    elif rsi >= 70 and bearish_candle:
+        results["rsi"]=_strategy_result("SELL", 78, ["RSI overbought","Bearish candle"])
+    else: results["rsi"]=_strategy_result()
+
+    # 12. Bollinger Bands
+    if bb:
+        mid,upper,lower=bb
+        if prev_close < lower and current_price > lower:
+            results["bollinger_bands"]=_strategy_result("BUY", 84, ["Price re-entered lower Bollinger band"])
+        elif prev_close > upper and current_price < upper:
+            results["bollinger_bands"]=_strategy_result("SELL", 84, ["Price re-entered upper Bollinger band"])
+        else: results["bollinger_bands"]=_strategy_result()
+    else: results["bollinger_bands"]=_strategy_result()
+
+    # 13. Fibonacci retracement
+    fib_hi=max(highs[-30:]); fib_lo=min(lows[-30:]); span=fib_hi-fib_lo
+    fib_levels=[fib_hi-span*.382, fib_hi-span*.5, fib_hi-span*.618] if span>0 else []
+    near_fib=any(abs(current_price-x)<=max(atr*.25,abs(current_price)*.0004) for x in fib_levels)
+    if near_fib and bullish_candle and current_price < fib_hi:
+        results["fibonacci"]=_strategy_result("BUY", 70, ["Price reacting near 38.2/50/61.8% retracement"])
+    elif near_fib and bearish_candle and current_price > fib_lo:
+        results["fibonacci"]=_strategy_result("SELL", 70, ["Price reacting near 38.2/50/61.8% retracement"])
+    else: results["fibonacci"]=_strategy_result()
+
+    # 14. Scalping
+    if atr > 0 and body >= atr*.35:
+        if ema9 > ema26 and bullish_candle and rsi >= 52:
+            results["scalping"]=_strategy_result("BUY", 74, ["Strong current candle","Short-term EMA direction","RSI momentum"])
+        elif ema9 < ema26 and bearish_candle and rsi <= 48:
+            results["scalping"]=_strategy_result("SELL", 74, ["Strong current candle","Short-term EMA direction","RSI momentum"])
+        else: results["scalping"]=_strategy_result()
+    else: results["scalping"]=_strategy_result()
+
+    # 15. News / Volatility: no news calendar is assumed. This is an
+    # objective volatility-expansion detector, so it never pretends to know
+    # that a move was caused by news.
+    atrs=_atr_series(c,14)
+    if len(atrs)>=5 and atrs[-1] > sum(atrs[-5:-1])/4 * 1.35:
+        if bullish_candle: results["volatility_expansion"]=_strategy_result("BUY", 70, ["ATR volatility expansion","Bullish candle"])
+        elif bearish_candle: results["volatility_expansion"]=_strategy_result("SELL", 70, ["ATR volatility expansion","Bearish candle"])
+        else: results["volatility_expansion"]=_strategy_result()
+    else: results["volatility_expansion"]=_strategy_result()
+
+    return results
+
+
 def analyze_market(
     asset_name,
     symbol,
@@ -3467,6 +3723,13 @@ def analyze_market(
 
     vwap = calculate_vwap(
         candles
+    )
+
+    # Independent strategy candidates. These are additive and do not
+    # replace or alter the existing KETS signal calculation.
+    strategy_signals = evaluate_additional_strategies(
+        candles, current_price, ema9, ema26, rsi, curr_macd, curr_signal,
+        atr, adx, plus_di, minus_di, vwap
     )
 
     # ========================================================
@@ -4572,6 +4835,11 @@ def analyze_market(
         "smc_reasons": smc.get("reasons", []),
         "smc_components": smc.get("components", {}),
 
+
+        # Independent strategy candidates for KETS Auto-Trader controls.
+        "available_strategies": list(ADDITIONAL_STRATEGIES.keys()),
+        "strategy_signals": strategy_signals,
+
         "timestamp":
             timestamp
 
@@ -4926,6 +5194,34 @@ def run_strategy():
                     symbol,
                     candles
                 )
+
+                # Independent strategy feed for Auto-Trader. This is sent on
+                # every completed scan and does not create a normal KETS signal.
+                if signal and signal.get("strategy_signals"):
+                    send_strategy_scan_to_kets(
+                        asset, symbol, price, signal.get("strategy_signals", {})
+                    )
+                else:
+                    # If the normal setup does not qualify, calculate the
+                    # independent candidates so an enabled KETS strategy can
+                    # still operate without changing the normal signal feed.
+                    try:
+                        _ema9=calculate_ema([x["close"] for x in candles],9)
+                        _ema26=calculate_ema([x["close"] for x in candles],26)
+                        _rsi=calculate_rsi([x["close"] for x in candles],14)
+                        _macd=calculate_macd_series([x["close"] for x in candles])
+                        _atr=calculate_atr(candles,14)
+                        _adx=calculate_adx(candles,14)
+                        _vwap=calculate_vwap(candles)
+                        if _macd:
+                            _strategies=evaluate_additional_strategies(
+                                candles, price, _ema9, _ema26, _rsi,
+                                _macd["macd"], _macd["signal"], _atr,
+                                _adx["adx"], _adx["plus_di"], _adx["minus_di"], _vwap
+                            )
+                            send_strategy_scan_to_kets(asset, symbol, price, _strategies)
+                    except Exception as _strategy_exc:
+                        print(f"⚠️ Independent strategy scan failed for {asset}: {_strategy_exc}")
 
                 # Record EVERY completed scan for the website.
                 # A rejected setup remains history only and does not
