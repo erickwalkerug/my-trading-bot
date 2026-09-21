@@ -199,6 +199,18 @@ KETS_SIGNAL_SOURCE_KEY = (
     or ""
 ).strip()
 
+# Authentication candidates for the KETS website bridge. In older Render
+# deployments KETS_SIGNAL_SOURCE_KEY could remain stale while KETS_API_KEY
+# was updated. Keep the existing setup, but automatically retry with the
+# bot's KETS_API_KEY when the first credential is rejected.
+def _kets_auth_keys():
+    keys = []
+    for key in (KETS_SIGNAL_SOURCE_KEY, API_KEY):
+        key = (key or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
 def send_signal_to_kets_website(api_signal):
     """POST a generated signal to the KETS website."""
     if not KETS_SIGNAL_SOURCE_URL:
@@ -210,30 +222,34 @@ def send_signal_to_kets_website(api_signal):
         return False
 
     try:
-        response = requests.post(
-            KETS_SIGNAL_SOURCE_URL,
-            json=api_signal,
-            headers={
-                "X-KETS-API-KEY": KETS_SIGNAL_SOURCE_KEY.strip(),
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        )
-
-        if 200 <= response.status_code < 300:
-            print(
-                f"✅ KETS website received signal "
-                f"{api_signal.get('id')} "
-                f"(HTTP {response.status_code})"
-                f"{' — STRONG REVERSAL ENTRY / HIGH QUALITY ENTRY' if api_signal.get('strong_reversal_entry') else ''}"
+        last_response = None
+        for auth_key in _kets_auth_keys():
+            response = requests.post(
+                KETS_SIGNAL_SOURCE_URL,
+                json=api_signal,
+                headers={
+                    "X-KETS-API-KEY": auth_key,
+                    "Content-Type": "application/json",
+                },
+                timeout=15,
             )
-            return True
+            last_response = response
+            if 200 <= response.status_code < 300:
+                print(
+                    f"✅ KETS website received signal "
+                    f"{api_signal.get('id')} "
+                    f"(HTTP {response.status_code})"
+                    f"{' — STRONG REVERSAL ENTRY / HIGH QUALITY ENTRY' if api_signal.get('strong_reversal_entry') else ''}"
+                )
+                return True
+            if response.status_code != 401:
+                break
 
         print(
             f"❌ KETS website rejected signal "
             f"{api_signal.get('id')}: "
-            f"HTTP {response.status_code} "
-            f"{response.text[:300]}"
+            f"HTTP {last_response.status_code if last_response is not None else 'N/A'} "
+            f"{last_response.text[:300] if last_response is not None else ''}"
         )
         return False
 
@@ -270,13 +286,29 @@ def send_strategy_scan_to_kets(asset, symbol, price, strategy_signals):
     elif not url.endswith("/api/strategy-scans"):
         url += "/api/strategy-scans"
     try:
-        r=requests.post(url, json=payload, headers={
-            "X-KETS-API-KEY": KETS_SIGNAL_SOURCE_KEY.strip(),
-            "Content-Type":"application/json"
-        }, timeout=15)
-        if 200 <= r.status_code < 300:
-            return True
-        print(f"⚠️ KETS strategy scan rejected: HTTP {r.status_code} {r.text[:200]}")
+        last_response = None
+        for auth_key in _kets_auth_keys():
+            r=requests.post(url, json=payload, headers={
+                "X-KETS-API-KEY": auth_key,
+                "Content-Type":"application/json"
+            }, timeout=15)
+            last_response = r
+            if 200 <= r.status_code < 300:
+                print(
+                    f"✅ KETS strategy scan delivered "
+                    f"{payload.get('asset')} "
+                    f"({len(strategy_signals)} strategies) HTTP {r.status_code}"
+                )
+                return True
+            # A 401 can be caused by an old KETS_SIGNAL_SOURCE_KEY. Retry
+            # automatically with KETS_API_KEY before declaring the scan rejected.
+            if r.status_code != 401:
+                break
+        print(
+            f"⚠️ KETS strategy scan rejected: HTTP "
+            f"{last_response.status_code if last_response is not None else 'N/A'} "
+            f"{last_response.text[:200] if last_response is not None else ''}"
+        )
     except requests.RequestException as exc:
         print(f"⚠️ KETS strategy scan delivery failed: {exc}")
     return False
