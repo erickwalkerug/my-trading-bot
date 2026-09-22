@@ -56,8 +56,8 @@ def _num(x):
     except (TypeError, ValueError):
         return None
 
-SIGNAL_RETENTION_DAYS = 7
-ENGINE_HISTORY_RETENTION_DAYS = 7
+SIGNAL_RETENTION_DAYS = 2
+ENGINE_HISTORY_RETENTION_MINUTES = 10
 
 def db_conn():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
@@ -116,150 +116,17 @@ def persistent_select(table, limit=200, asset=None):
 
 def persistent_cleanup(table, retention_days):
     cutoff=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=retention_days)).isoformat()
-    col="timestamp_utc"
     with DB_LOCK:
-        conn=db_conn(); conn.execute(f"DELETE FROM {table} WHERE {col} < ?",(cutoff,)); conn.commit(); conn.close()
+        conn=db_conn()
+        conn.execute(f"DELETE FROM {table} WHERE timestamp_utc < ?", (cutoff,))
+        conn.commit(); conn.close()
 
-init_storage()
-
-# ============================================================
-# KETS STRATEGY ENGINE
-# ADVANCED EARLY ENTRY VERSION
-#
-# TIMEFRAME: 1 MINUTE
-# SCAN: EVERY 1 MINUTE
-#
-# TELEGRAM:
-# 1. BOT = FULL TECHNICAL / INTELLIGENCE MESSAGE
-# 2. CHANNEL = CLEAN PUBLIC SIGNAL
-#
-# WEBSITE:
-# SECURE SIGNAL API
-#
-# CORE RULES:
-# EMA 9 / EMA 26
-# RSI 14
-# ONE MACD 12 / 26 / 9
-# CANDLE STRUCTURE
-# EARLY ENTRY SCORING
-#
-# ADVANCED INTELLIGENCE:
-# ADX / TREND STRENGTH
-# ATR / VOLATILITY
-# 5-MIN CONTEXT
-# 15-MIN CONTEXT
-# SUPPORT / RESISTANCE
-# MOMENTUM ACCELERATION
-# CANDLE QUALITY
-# VWAP WHEN VOLUME IS AVAILABLE
-# MARKET REGIME
-# DATA QUALITY
-# CHASING / OVEREXTENSION PROTECTION
-# SIGNAL CLASSIFICATION
-#
-# SIGNAL STRENGTH:
-# STRATEGY-ALIGNMENT SCORE
-# NOT WIN PROBABILITY
-#
-# WEBSITE API:
-# GET /api/health
-# GET /api/signals
-# GET /api/signals/<asset>
-#
-# API RETENTION:
-# MOST RECENT 7 DAYS
-# ============================================================
-
-
-# ============================================================
-# RENDER WEB SERVER
-# ============================================================
-
-app = Flask(__name__)
-
-
-# ============================================================
-# KETS SECURE SIGNAL API
-# ============================================================
-
-API_KEY = os.environ.get("KETS_API_KEY")
-
-# ============================================================
-# KETS WEBSITE SIGNAL BRIDGE
-# Sends every newly generated signal directly to the KETS
-# website/API. Configure these in Render environment variables.
-# ============================================================
-KETS_SIGNAL_SOURCE_URL = os.environ.get(
-    "KETS_SIGNAL_SOURCE_URL",
-    "https://kets.onrender.com/api/signals"
-)
-KETS_SIGNAL_SOURCE_KEY = (
-    os.environ.get("KETS_SIGNAL_SOURCE_KEY")
-    or API_KEY
-    or ""
-).strip()
-
-# Authentication candidates for the KETS website bridge. In older Render
-# deployments KETS_SIGNAL_SOURCE_KEY could remain stale while KETS_API_KEY
-# was updated. Keep the existing setup, but automatically retry with the
-# bot's KETS_API_KEY when the first credential is rejected.
-def _kets_auth_keys():
-    keys = []
-    for key in (KETS_SIGNAL_SOURCE_KEY, API_KEY):
-        key = (key or "").strip()
-        if key and key not in keys:
-            keys.append(key)
-    return keys
-
-def send_signal_to_kets_website(api_signal):
-    """POST a generated signal to the KETS website."""
-    if not KETS_SIGNAL_SOURCE_URL:
-        print("⚠️ KETS website URL is missing; signal not sent.")
-        return False
-
-    if not KETS_SIGNAL_SOURCE_KEY:
-        print("⚠️ KETS website API key is missing; signal not sent.")
-        return False
-
-    try:
-        last_response = None
-        for auth_key in _kets_auth_keys():
-            response = requests.post(
-                KETS_SIGNAL_SOURCE_URL,
-                json=api_signal,
-                headers={
-                    "X-KETS-API-KEY": auth_key,
-                    "Content-Type": "application/json",
-                },
-                timeout=15,
-            )
-            last_response = response
-            if 200 <= response.status_code < 300:
-                print(
-                    f"✅ KETS website received signal "
-                    f"{api_signal.get('id')} "
-                    f"(HTTP {response.status_code})"
-                    f"{' — STRONG REVERSAL ENTRY / HIGH QUALITY ENTRY' if api_signal.get('strong_reversal_entry') else ''}"
-                )
-                return True
-            if response.status_code != 401:
-                break
-
-        print(
-            f"❌ KETS website rejected signal "
-            f"{api_signal.get('id')}: "
-            f"HTTP {last_response.status_code if last_response is not None else 'N/A'} "
-            f"{last_response.text[:300] if last_response is not None else ''}"
-        )
-        return False
-
-    except requests.RequestException as exc:
-        print(
-            f"❌ KETS website signal delivery failed: "
-            f"{exc}"
-        )
-        return False
-
+def persistent_cleanup_minutes(table, retention_minutes):
+    cutoff=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=retention_minutes)).isoformat()
+    with DB_LOCK:
+        conn=db_conn()
+        conn.execute(f"DELETE FROM {table} WHERE timestamp_utc < ?", (cutoff,))
+        conn.commit(); conn.close()
 
 signal_history = []
 engine_history = []
@@ -313,9 +180,9 @@ def send_strategy_scan_to_kets(asset, symbol, price, strategy_signals):
         print(f"⚠️ KETS strategy scan delivery failed: {exc}")
     return False
 
-SIGNAL_RETENTION_DAYS = 7
-ENGINE_HISTORY_RETENTION_DAYS = 7
-ENGINE_HISTORY_MAX_ITEMS = 2000
+SIGNAL_RETENTION_DAYS = 2
+ENGINE_HISTORY_RETENTION_MINUTES = 10
+ENGINE_HISTORY_MAX_ITEMS = 30
 
 
 def clean_old_signals():
@@ -356,7 +223,7 @@ def clean_old_engine_history():
 
     cutoff = (
         datetime.datetime.now(datetime.timezone.utc)
-        - datetime.timedelta(days=ENGINE_HISTORY_RETENTION_DAYS)
+        - datetime.timedelta(minutes=ENGINE_HISTORY_RETENTION_MINUTES)
     )
 
     with engine_history_lock:
@@ -388,7 +255,7 @@ def save_engine_history(
 ):
     """Record every completed KETS market scan for the website.
 
-    A rejected setup is history only; it is never promoted to a signal.
+    A rejected setup is temporary scan history only; it is never promoted to a signal. Temporary scan snapshots expire after 10 minutes.
     """
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     timestamp_eat = get_eat_time().strftime("%Y-%m-%d %H:%M:%S EAT")
@@ -432,7 +299,7 @@ def save_engine_history(
 
     persistent_upsert("engine_history", item)
     clean_old_engine_history()
-    persistent_cleanup("engine_history", ENGINE_HISTORY_RETENTION_DAYS)
+    persistent_cleanup_minutes("engine_history", ENGINE_HISTORY_RETENTION_MINUTES)
     return item
 
 
@@ -725,7 +592,7 @@ def api_engine_history():
     return jsonify({
         "status": "success",
         "count": len(history),
-        "retention_days": ENGINE_HISTORY_RETENTION_DAYS,
+        "retention_minutes": ENGINE_HISTORY_RETENTION_MINUTES,
         "history": history,
     })
 
@@ -5100,7 +4967,7 @@ def run_strategy():
     )
 
     print(
-        "🗂️ API retention = 7 days"
+        "🗂️ Signal API retention = 2 days | temporary scan snapshots = 10 minutes"
     )
 
     # ========================================================
