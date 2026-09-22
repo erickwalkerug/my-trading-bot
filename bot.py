@@ -892,31 +892,36 @@ def get_eat_time():
 
 
 # ============================================================
-# TRADING HOURS
-# 06:00 AM - 06:00 PM EAT
+# TRADING SESSIONS — EAT (UTC+3)
+# 06:00-11:00 and 14:30-17:30
 # ============================================================
 
+TRADING_SESSIONS = (
+    (datetime.time(6, 0), datetime.time(11, 0), "ACTIVE"),
+    (datetime.time(14, 30), datetime.time(17, 30), "ACTIVE"),
+)
+
+def trading_session(now=None):
+    now = now or get_eat_time()
+    t = now.time()
+    for start, end, mode in TRADING_SESSIONS:
+        if start <= t < end:
+            return {"mode": mode, "active": True, "next_boundary": datetime.datetime.combine(now.date(), end)}
+    if t < datetime.time(6, 0):
+        boundary = datetime.datetime.combine(now.date(), datetime.time(6, 0))
+    elif t < datetime.time(14, 30):
+        boundary = datetime.datetime.combine(now.date(), datetime.time(14, 30))
+    else:
+        boundary = datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(6, 0))
+    mode = "IDLE" if datetime.time(11, 0) <= t < datetime.time(14, 30) else "OUTSIDE_HOURS"
+    return {"mode": mode, "active": False, "next_boundary": boundary}
+
 def trading_hours_open():
+    return trading_session()["active"]
 
-    current_time = (
-        get_eat_time().time()
-    )
-
-    start_time = datetime.time(
-        6,
-        0
-    )
-
-    end_time = datetime.time(
-        18,
-        0
-    )
-
-    return (
-        start_time
-        <= current_time
-        < end_time
-    )
+def seconds_to_session_boundary(now=None):
+    now = now or get_eat_time()
+    return max(0, int((trading_session(now)["next_boundary"] - now.replace(tzinfo=None)).total_seconds()))
 
 
 # ============================================================
@@ -1079,54 +1084,44 @@ def calculate_rsi(
 # ============================================================
 
 def calculate_macd_series(prices):
+    """Calculate the existing MACD definition in O(n) instead of O(n^2).
 
+    The original implementation recalculated EMA12 and EMA26 over every
+    growing window, then recalculated the signal EMA over every growing MACD
+    window. This produced substantial repeated CPU work on every 1-minute
+    scan. The recursive EMA form below preserves the same initial SMA seeds
+    used by calculate_ema while avoiding the repeated work.
+    """
     if len(prices) < 40:
-
         return None
 
-    macd_values = []
+    prices = [float(x) for x in prices]
 
-    for i in range(
-        26,
-        len(prices) + 1
-    ):
+    def ema_series(values, period):
+        if len(values) < period:
+            return []
+        out = [None] * (period - 1)
+        ema = sum(values[:period]) / period
+        out.append(ema)
+        multiplier = 2.0 / (period + 1)
+        for value in values[period:]:
+            ema = (value - ema) * multiplier + ema
+            out.append(ema)
+        return out
 
-        window = prices[:i]
-
-        ema12 = calculate_ema(
-            window,
-            12
-        )
-
-        ema26 = calculate_ema(
-            window,
-            26
-        )
-
-        macd_values.append(
-            ema12 - ema26
-        )
+    ema12 = ema_series(prices, 12)
+    ema26 = ema_series(prices, 26)
+    macd_values = [
+        ema12[i] - ema26[i]
+        for i in range(25, len(prices))
+    ]
 
     if len(macd_values) < 12:
-
         return None
 
-    signal_values = []
-
-    for i in range(
-        9,
-        len(macd_values) + 1
-    ):
-
-        signal_values.append(
-            calculate_ema(
-                macd_values[:i],
-                9
-            )
-        )
-
+    signal_values = ema_series(macd_values, 9)
+    signal_values = [x for x in signal_values if x is not None]
     if len(signal_values) < 2:
-
         return None
 
     return {
@@ -3078,22 +3073,36 @@ def _bbands(closes, period=20, deviations=2.0):
     return mean, mean + deviations * std, mean - deviations * std
 
 def _atr_series(candles, period=14):
+    """Return the ATR series with a rolling sum (O(n), not O(n*period))."""
     if len(candles) < period + 1:
         return []
-    out=[]
-    for i in range(period, len(candles)):
-        trs=[]
-        for j in range(i-period+1, i+1):
-            cur=candles[j]; prev=candles[j-1]
-            trs.append(max(float(cur["high"])-float(cur["low"]),
-                           abs(float(cur["high"])-float(prev["close"])),
-                           abs(float(cur["low"])-float(prev["close"]))))
-        out.append(sum(trs)/len(trs))
+
+    true_ranges = []
+    for i in range(1, len(candles)):
+        cur = candles[i]
+        prev = candles[i - 1]
+        high = float(cur["high"])
+        low = float(cur["low"])
+        prev_close = float(prev["close"])
+        true_ranges.append(max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close),
+        ))
+
+    if len(true_ranges) < period:
+        return []
+
+    window_sum = sum(true_ranges[:period])
+    out = [window_sum / period]
+    for i in range(period, len(true_ranges)):
+        window_sum += true_ranges[i] - true_ranges[i - period]
+        out.append(window_sum / period)
     return out
 
 def evaluate_additional_strategies(candles, current_price, ema9, ema26, rsi,
                                    curr_macd, curr_signal, atr, adx, plus_di,
-                                   minus_di, vwap):
+                                   minus_di, vwap, prev_ema9=None, prev_ema26=None):
     """Return independent strategy candidates without changing core KETS logic."""
     c=candles
     closes=[float(x["close"]) for x in c]
@@ -3196,7 +3205,10 @@ def evaluate_additional_strategies(candles, current_price, ema9, ema26, rsi,
     else: results["vwap"]=_strategy_result()
 
     # 9. Moving Average Cross
-    prev_ema9=calculate_ema(closes[:-1],9); prev_ema26=calculate_ema(closes[:-1],26)
+    if prev_ema9 is None:
+        prev_ema9 = calculate_ema(closes[:-1], 9)
+    if prev_ema26 is None:
+        prev_ema26 = calculate_ema(closes[:-1], 26)
     if prev_ema9 <= prev_ema26 and ema9 > ema26:
         results["moving_average_cross"]=_strategy_result("BUY", 90, ["Fresh EMA9/EMA26 bullish crossover"])
     elif prev_ema9 >= prev_ema26 and ema9 < ema26:
@@ -3761,7 +3773,7 @@ def analyze_market(
     # replace or alter the existing KETS signal calculation.
     strategy_signals = evaluate_additional_strategies(
         candles, current_price, ema9, ema26, rsi, curr_macd, curr_signal,
-        atr, adx, plus_di, minus_di, vwap
+        atr, adx, plus_di, minus_di, vwap, previous_ema9, previous_ema26
     )
 
     # ========================================================
@@ -3819,7 +3831,13 @@ def analyze_market(
             reasons = ["SMC AUTO-TRADER ENTRY"] + list(smc.get("reasons") or [])
             smc_only_signal = True
         else:
-            return None
+            # Preserve independent strategy results even when the core KETS
+            # setup does not qualify, so the caller does not recalculate the
+            # entire indicator stack a second time.
+            return {
+                "_no_core_signal": True,
+                "strategy_signals": strategy_signals,
+            }
     else:
         # Existing KETS signal path is unchanged.
         pass
@@ -4903,7 +4921,7 @@ def build_startup_messages():
         "🔄 Scan interval: 1 minute\n"
 
         "⏰ Trading hours: "
-        "06:00 AM - 06:00 PM EAT\n"
+        "06:00-11:00 & 14:30-17:30 EAT\n"
 
         "💰 Monday-Friday: GOLD ONLY\n"
 
@@ -4956,7 +4974,7 @@ def build_startup_messages():
 
         "🔄 New analysis every 1 minute\n"
 
-        "⏰ Active: 06:00-18:00 EAT\n"
+        "⏰ Active: 06:00-11:00 & 14:30-17:30 EAT\n"
 
         "💰 Monday-Friday: GOLD ONLY\n"
 
@@ -5053,7 +5071,7 @@ def run_strategy():
 
     print(
         "⏰ Trading hours: "
-        "06:00 AM - 06:00 PM EAT"
+        "06:00-11:00 & 14:30-17:30 EAT"
     )
 
     print(
@@ -5117,15 +5135,11 @@ def run_strategy():
             # TRADING HOURS
             # =================================================
 
-            if not trading_hours_open():
-
-                print(
-                    f"⏰ Outside trading hours: "
-                    f"{now_eat.strftime('%H:%M:%S')} EAT"
-                )
-
-                time.sleep(60)
-
+            session = trading_session(now_eat)
+            if not session["active"]:
+                wait_seconds = min(60, max(1, seconds_to_session_boundary(now_eat)))
+                print(f"⏸️ {session['mode']}: {now_eat.strftime('%H:%M:%S')} EAT — next session in {seconds_to_session_boundary(now_eat)}s")
+                time.sleep(wait_seconds)
                 continue
 
             # =================================================
@@ -5227,38 +5241,19 @@ def run_strategy():
                     candles
                 )
 
-                # Independent strategy feed for Auto-Trader. This is sent on
-                # every completed scan and does not create a normal KETS signal.
+                # A no-core-signal result still carries the independent strategy
+                # candidates. Reuse those results rather than rebuilding every
+                # indicator a second time.
+                _no_core_signal = bool(signal and signal.get("_no_core_signal"))
                 if signal and signal.get("strategy_signals"):
                     send_strategy_scan_to_kets(
                         asset, symbol, price, signal.get("strategy_signals", {})
                     )
-                else:
-                    # If the normal setup does not qualify, calculate the
-                    # independent candidates so an enabled KETS strategy can
-                    # still operate without changing the normal signal feed.
-                    try:
-                        _ema9=calculate_ema([x["close"] for x in candles],9)
-                        _ema26=calculate_ema([x["close"] for x in candles],26)
-                        _rsi=calculate_rsi([x["close"] for x in candles],14)
-                        _macd=calculate_macd_series([x["close"] for x in candles])
-                        _atr=calculate_atr(candles,14)
-                        _adx=calculate_adx(candles,14)
-                        _vwap=calculate_vwap(candles)
-                        if _macd:
-                            _strategies=evaluate_additional_strategies(
-                                candles, price, _ema9, _ema26, _rsi,
-                                _macd["macd"], _macd["signal"], _atr,
-                                _adx["adx"], _adx["plus_di"], _adx["minus_di"], _vwap
-                            )
-                            send_strategy_scan_to_kets(asset, symbol, price, _strategies)
-                    except Exception as _strategy_exc:
-                        print(f"⚠️ Independent strategy scan failed for {asset}: {_strategy_exc}")
 
                 # Record EVERY completed scan for the website.
                 # A rejected setup remains history only and does not
                 # enter signal_history or get pushed as a trade signal.
-                if signal:
+                if signal and not _no_core_signal:
                     save_engine_history(
                         asset,
                         symbol,
@@ -5280,7 +5275,7 @@ def run_strategy():
                 # SIGNAL
                 # =============================================
 
-                if signal:
+                if signal and not _no_core_signal:
 
                     print(
                         f"🎯 KETS {asset} "
