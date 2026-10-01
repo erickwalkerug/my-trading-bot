@@ -1,0 +1,26 @@
+KETS FINAL CONFIGURATION
+
+Working schedule (EAT / UTC+3):
+- Monday-Friday: 06:00-11:00
+- Monday-Friday: 15:00-18:00
+- Saturday-Sunday: OFFLINE
+
+Outside active windows, market scanning is paused. The 1-minute scan interval is unchanged while active.
+
+Preserved:
+- Existing Gold signal strategy
+- Existing Bitcoin logic/code (not scheduled on weekends in this build)
+- Strong Reversal strategy
+- SMC and additional strategy calculations
+- Auto-Trader signal-history flow
+- cTrader execution and position-protection flow
+- Existing stop loss / take profit / break-even / trailing controls
+- 2-day persisted signal history
+
+RAM protections:
+- Temporary engine scan history: 10-minute retention
+- Engine scan RAM cap: 30 items
+- In-memory signal cache is capped; persisted history remains 2 days
+- Temporary strategy-scan feed remains short-lived
+
+No trading-strategy thresholds or entry calculations were changed by this configuration fix.

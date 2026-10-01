@@ -58,6 +58,7 @@ def _num(x):
 
 SIGNAL_RETENTION_DAYS = 2
 ENGINE_HISTORY_RETENTION_MINUTES = 10
+MAX_IN_MEMORY_SIGNALS = 500
 
 def db_conn():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
@@ -78,6 +79,13 @@ def init_storage():
             payload TEXT NOT NULL, created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_bot_history_asset_time ON engine_history(asset, timestamp_utc);
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY, value TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO bot_settings(key,value) VALUES(
+            'trading_schedule',
+            '{"timezone":"EAT","weekdays":[0,1,2,3,4],"sessions":[["06:00","11:00"],["15:00","18:00"]],"weekend":"OFFLINE"}'
+        );
         """)
         conn.commit(); conn.close()
 
@@ -759,28 +767,59 @@ def get_eat_time():
 
 
 # ============================================================
+# SAVED TRADING SCHEDULE
+# The schedule is seeded in persistent SQLite so a restart/redeploy does not
+# silently revert the user's working hours. The current approved schedule is
+# Monday-Friday 06:00-11:00 and 15:00-18:00 EAT; weekends are offline.
+# ============================================================
+def load_saved_trading_schedule():
+    default = [(datetime.time(6, 0), datetime.time(11, 0), "ACTIVE"),
+               (datetime.time(15, 0), datetime.time(18, 0), "ACTIVE")]
+    try:
+        with DB_LOCK:
+            conn = db_conn()
+            row = conn.execute("SELECT value FROM bot_settings WHERE key=?", ("trading_schedule",)).fetchone()
+            conn.close()
+        if row:
+            cfg = json.loads(row[0])
+            sessions = []
+            for start, end in cfg.get("sessions", []):
+                sh, sm = [int(x) for x in str(start).split(":", 1)]
+                eh, em = [int(x) for x in str(end).split(":", 1)]
+                sessions.append((datetime.time(sh, sm), datetime.time(eh, em), "ACTIVE"))
+            if sessions:
+                return tuple(sessions)
+    except Exception as exc:
+        print(f"⚠️ Saved trading schedule load failed; using defaults: {exc}")
+    return tuple(default)
+
+
+# ============================================================
 # TRADING SESSIONS — EAT (UTC+3)
-# 06:00-11:00 and 14:30-17:30
+# Monday-Friday: 06:00-11:00 and 15:00-18:00
+# Saturday-Sunday: OFFLINE
 # ============================================================
 
-TRADING_SESSIONS = (
-    (datetime.time(6, 0), datetime.time(11, 0), "ACTIVE"),
-    (datetime.time(14, 30), datetime.time(17, 30), "ACTIVE"),
-)
+TRADING_SESSIONS = load_saved_trading_schedule()
 
 def trading_session(now=None):
     now = now or get_eat_time()
     t = now.time()
+    # Saturday and Sunday are completely offline for market scanning.
+    if now.weekday() >= 5:
+        days_to_monday = 7 - now.weekday()
+        boundary = datetime.datetime.combine(now.date() + datetime.timedelta(days=days_to_monday), datetime.time(6, 0))
+        return {"mode": "WEEKEND_OFFLINE", "active": False, "next_boundary": boundary}
     for start, end, mode in TRADING_SESSIONS:
         if start <= t < end:
             return {"mode": mode, "active": True, "next_boundary": datetime.datetime.combine(now.date(), end)}
     if t < datetime.time(6, 0):
         boundary = datetime.datetime.combine(now.date(), datetime.time(6, 0))
-    elif t < datetime.time(14, 30):
-        boundary = datetime.datetime.combine(now.date(), datetime.time(14, 30))
+    elif t < datetime.time(15, 0):
+        boundary = datetime.datetime.combine(now.date(), datetime.time(15, 0))
     else:
         boundary = datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(6, 0))
-    mode = "IDLE" if datetime.time(11, 0) <= t < datetime.time(14, 30) else "OUTSIDE_HOURS"
+    mode = "IDLE" if datetime.time(11, 0) <= t < datetime.time(15, 0) else "OUTSIDE_HOURS"
     return {"mode": mode, "active": False, "next_boundary": boundary}
 
 def trading_hours_open():
@@ -798,7 +837,7 @@ def seconds_to_session_boundary(now=None):
 # GOLD ONLY
 #
 # SATURDAY-SUNDAY:
-# BTC ONLY
+# OFFLINE
 # ============================================================
 
 def get_markets():
@@ -809,10 +848,8 @@ def get_markets():
 
     if weekday >= 5:
 
-        # Saturday-Sunday: Bitcoin only
-        return {
-            "BTC": "BTC/USD"
-        }
+        # Saturday-Sunday: fully offline
+        return {}
 
     # Monday-Friday: Gold only
     return {
@@ -4788,7 +4825,7 @@ def build_startup_messages():
         "🔄 Scan interval: 1 minute\n"
 
         "⏰ Trading hours: "
-        "06:00-11:00 & 14:30-17:30 EAT\n"
+        "06:00-11:00 & 15:00-18:00 EAT\n"
 
         "💰 Monday-Friday: GOLD ONLY\n"
 
@@ -4841,7 +4878,7 @@ def build_startup_messages():
 
         "🔄 New analysis every 1 minute\n"
 
-        "⏰ Active: 06:00-11:00 & 14:30-17:30 EAT\n"
+        "⏰ Active: 06:00-11:00 & 15:00-18:00 EAT\n"
 
         "💰 Monday-Friday: GOLD ONLY\n"
 
@@ -4938,7 +4975,7 @@ def run_strategy():
 
     print(
         "⏰ Trading hours: "
-        "06:00-11:00 & 14:30-17:30 EAT"
+        "06:00-11:00 & 15:00-18:00 EAT"
     )
 
     print(
