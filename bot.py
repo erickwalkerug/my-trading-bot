@@ -8,6 +8,61 @@ from threading import Thread, Lock
 from flask import Flask, jsonify, request
 import requests
 
+# ============================================================
+# KETS WEB/API CONFIGURATION
+# ============================================================
+app = Flask(__name__)
+API_KEY = os.environ.get("KETS_API_KEY", "").strip()
+KETS_SIGNAL_SOURCE_URL = os.environ.get(
+    "KETS_SIGNAL_SOURCE_URL",
+    "https://kets.onrender.com/api/signals"
+).strip()
+KETS_SIGNAL_SOURCE_KEY = os.environ.get("KETS_SIGNAL_SOURCE_KEY", "").strip()
+
+def _kets_auth_keys():
+    """Return configured KETS API keys without duplicates."""
+    keys = []
+    for key in (KETS_SIGNAL_SOURCE_KEY, API_KEY):
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+def send_signal_to_kets_website(api_signal):
+    """Push a generated signal to the configured KETS website endpoint."""
+    if not KETS_SIGNAL_SOURCE_URL or not api_signal:
+        return False
+    last_response = None
+    try:
+        keys = _kets_auth_keys() or [""]
+        for auth_key in keys:
+            headers = {"Content-Type": "application/json"}
+            if auth_key:
+                headers["X-KETS-API-KEY"] = auth_key
+            last_response = requests.post(
+                KETS_SIGNAL_SOURCE_URL.rstrip("/"),
+                json=api_signal,
+                headers=headers,
+                timeout=15,
+            )
+            if 200 <= last_response.status_code < 300:
+                print(
+                    f"✅ KETS website signal delivered: "
+                    f"{api_signal.get('asset')} {api_signal.get('direction')} "
+                    f"HTTP {last_response.status_code}"
+                )
+                return True
+            if last_response.status_code != 401:
+                break
+        print(
+            f"⚠️ KETS website signal rejected: HTTP "
+            f"{last_response.status_code if last_response is not None else 'N/A'} "
+            f"{last_response.text[:200] if last_response is not None else ''}"
+        )
+    except requests.RequestException as exc:
+        print(f"⚠️ KETS website signal delivery failed: {exc}")
+    return False
+
+
 
 # ============================================================
 # RENDER PERSISTENT STORAGE
@@ -88,6 +143,9 @@ def init_storage():
         );
         """)
         conn.commit(); conn.close()
+
+# Initialize SQLite tables before any saved-schedule/API access.
+init_storage()
 
 def persistent_upsert(table, item):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
