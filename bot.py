@@ -149,7 +149,7 @@ def init_storage():
         );
         INSERT OR IGNORE INTO bot_settings(key,value) VALUES(
             'trading_schedule',
-            '{"timezone":"EAT","weekdays":[0,1,2,3,4],"sessions":[["06:00","11:00"],["15:00","18:00"]],"weekend":"OFFLINE"}'
+            '{"timezone":"EAT","weekdays":[0,1,2,3,4],"sessions":[["06:00","18:00"]],"weekend":"OFFLINE"}'
         );
         """)
         conn.commit(); conn.close()
@@ -844,11 +844,10 @@ def get_eat_time():
 # SAVED TRADING SCHEDULE
 # The schedule is seeded in persistent SQLite so a restart/redeploy does not
 # silently revert the user's working hours. The current approved schedule is
-# Monday-Friday 06:00-11:00 and 15:00-18:00 EAT; weekends are offline.
+# Monday-Friday 06:00-18:00 EAT; weekends are offline.
 # ============================================================
 def load_saved_trading_schedule():
-    default = [(datetime.time(6, 0), datetime.time(11, 0), "ACTIVE"),
-               (datetime.time(15, 0), datetime.time(18, 0), "ACTIVE")]
+    default = [(datetime.time(6, 0), datetime.time(18, 0), "ACTIVE")]
     try:
         with DB_LOCK:
             conn = db_conn()
@@ -856,6 +855,16 @@ def load_saved_trading_schedule():
             conn.close()
         if row:
             cfg = json.loads(row[0])
+            if cfg.get("sessions") == [["06:00", "11:00"], ["15:00", "18:00"]]:
+                cfg["sessions"] = [["06:00", "18:00"]]
+                try:
+                    with DB_LOCK:
+                        conn2 = db_conn()
+                        conn2.execute("UPDATE bot_settings SET value=? WHERE key=?",
+                                      (json.dumps(cfg, separators=(",", ":")), "trading_schedule"))
+                        conn2.commit(); conn2.close()
+                except Exception as exc:
+                    print(f"⚠️ Trading schedule migration save failed: {exc}")
             sessions = []
             for start, end in cfg.get("sessions", []):
                 sh, sm = [int(x) for x in str(start).split(":", 1)]
@@ -870,7 +879,7 @@ def load_saved_trading_schedule():
 
 # ============================================================
 # TRADING SESSIONS — EAT (UTC+3)
-# Monday-Friday: 06:00-11:00 and 15:00-18:00
+# Monday-Friday: 06:00-18:00
 # Saturday-Sunday: OFFLINE
 # ============================================================
 
@@ -889,11 +898,11 @@ def trading_session(now=None):
             return {"mode": mode, "active": True, "next_boundary": datetime.datetime.combine(now.date(), end)}
     if t < datetime.time(6, 0):
         boundary = datetime.datetime.combine(now.date(), datetime.time(6, 0))
-    elif t < datetime.time(15, 0):
-        boundary = datetime.datetime.combine(now.date(), datetime.time(15, 0))
+    elif t < datetime.time(18, 0):
+        boundary = datetime.datetime.combine(now.date(), datetime.time(18, 0))
     else:
         boundary = datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(6, 0))
-    mode = "IDLE" if datetime.time(11, 0) <= t < datetime.time(15, 0) else "OUTSIDE_HOURS"
+    mode = "OUTSIDE_HOURS"
     return {"mode": mode, "active": False, "next_boundary": boundary}
 
 def trading_hours_open():
@@ -5180,7 +5189,7 @@ def build_startup_messages():
         "🔄 Scan interval: 1 minute\n"
 
         "⏰ Trading hours: "
-        "06:00-11:00 & 15:00-18:00 EAT\n"
+        "06:00-18:00 EAT\n"
 
         "💰 Monday-Friday: GOLD ONLY\n"
 
@@ -5233,7 +5242,7 @@ def build_startup_messages():
 
         "🔄 New analysis every 1 minute\n"
 
-        "⏰ Active: 06:00-11:00 & 15:00-18:00 EAT\n"
+        "⏰ Active: 06:00-18:00 EAT\n"
 
         "💰 Monday-Friday: GOLD ONLY\n"
 
@@ -5330,7 +5339,7 @@ def run_strategy():
 
     print(
         "⏰ Trading hours: "
-        "06:00-11:00 & 15:00-18:00 EAT"
+        "06:00-18:00 EAT"
     )
 
     print(
