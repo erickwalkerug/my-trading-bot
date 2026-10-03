@@ -12,3 +12,15 @@ SMC is additive and independent:
 
 The SMC detector uses the existing bot's SMC module (BOS, liquidity sweep,
 FVG, order-block proxy and market-structure checks).
+
+
+SMC calculation update (2026-10-03):
+- Uses completed 1-minute candles to avoid relying on a still-forming bar.
+- Confirms swing highs/lows with left/right pivot candles before using them as structure.
+- Detects BOS and CHoCH using confirmed structure breaks.
+- Detects buy-side/sell-side liquidity sweeps by wick-through + close-back-inside behavior.
+- Detects fresh three-candle FVGs with an ATR-relative minimum size.
+- Uses a displacement requirement and a more selective last-opposite-candle order-block proxy.
+- Adds premium/discount location and locally aggregated 5-minute structure as confluence.
+- SMC confirmation requires a structural event plus independent confluence; it is not
+  triggered by a single pattern.

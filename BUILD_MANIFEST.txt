@@ -1,0 +1,7 @@
+KETS SAFE BUILD — 2026-10-03
+Project: my-trading-bot
+Core strategy: preserved
+SMC: strengthened independently for Auto-Trader
+RAM: bounded in-memory signal/temporary history + HTTP connection reuse
+cTrader execution: performed by KETS website/server, not directly by this bot
+Deployment: NOT performed by this build

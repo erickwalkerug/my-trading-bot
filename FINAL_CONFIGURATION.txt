@@ -24,3 +24,13 @@ RAM protections:
 - Temporary strategy-scan feed remains short-lived
 
 No trading-strategy thresholds or entry calculations were changed by this configuration fix.
+
+
+SAFE EXECUTION / RAM BUILD (2026-10-03)
+- In-memory signal cache has a hard 500-item ceiling; persistent signal history remains 2 days.
+- Temporary engine history remains 10 minutes / 30 items.
+- Outbound HTTP uses a reusable connection pool to reduce connection churn.
+- SMC is evaluated independently using confirmed closed-candle structure, BOS/CHoCH,
+  liquidity sweeps, fresh FVGs, displacement, order-block proxy, premium/discount
+  location and locally aggregated 5-minute structure.
+- SMC does not replace the existing KETS core strategy.

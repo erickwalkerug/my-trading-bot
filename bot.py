@@ -7,6 +7,16 @@ from threading import Thread, Lock
 
 from flask import Flask, jsonify, request
 import requests
+from requests.adapters import HTTPAdapter
+
+# Reuse outbound HTTP connections instead of creating a new TCP/TLS connection
+# for every one-minute market fetch / KETS delivery. This reduces CPU and
+# connection churn on Render Free without changing scan frequency.
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.headers.update({"User-Agent": "KETS-Trading-Bot/1.0"})
+_adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4, max_retries=0)
+HTTP_SESSION.mount("https://", _adapter)
+HTTP_SESSION.mount("http://", _adapter)
 
 # ============================================================
 # KETS WEB/API CONFIGURATION
@@ -38,7 +48,7 @@ def send_signal_to_kets_website(api_signal):
             headers = {"Content-Type": "application/json"}
             if auth_key:
                 headers["X-KETS-API-KEY"] = auth_key
-            last_response = requests.post(
+            last_response = HTTP_SESSION.post(
                 KETS_SIGNAL_SOURCE_URL.rstrip("/"),
                 json=api_signal,
                 headers=headers,
@@ -221,7 +231,7 @@ def send_strategy_scan_to_kets(asset, symbol, price, strategy_signals):
     try:
         last_response = None
         for auth_key in _kets_auth_keys():
-            r=requests.post(url, json=payload, headers={
+            r=HTTP_SESSION.post(url, json=payload, headers={
                 "X-KETS-API-KEY": auth_key,
                 "Content-Type":"application/json"
             }, timeout=15)
@@ -478,6 +488,10 @@ def save_signal_for_api(
 
     with signal_lock:
         signal_history.append(api_signal)
+        # Hard RAM ceiling for the in-process cache. The full 2-day history
+        # remains on disk; only the newest entries stay in RAM.
+        if len(signal_history) > MAX_IN_MEMORY_SIGNALS:
+            del signal_history[:-MAX_IN_MEMORY_SIGNALS]
 
     persistent_upsert("signals", api_signal)
     clean_old_signals()
@@ -557,6 +571,8 @@ def api_receive_signal():
         }
         if payload.get("id") not in existing_ids:
             signal_history.append(payload)
+            if len(signal_history) > MAX_IN_MEMORY_SIGNALS:
+                del signal_history[:-MAX_IN_MEMORY_SIGNALS]
 
     persistent_upsert("signals", payload)
     clean_old_signals()
@@ -758,7 +774,7 @@ def send_message(
 
     try:
 
-        response = requests.post(
+        response = HTTP_SESSION.post(
             url,
             json=payload,
             timeout=15
@@ -2760,7 +2776,7 @@ def fetch_1m_candles(
 
     try:
 
-        response = requests.get(
+        response = HTTP_SESSION.get(
             url,
             params=params,
             timeout=20
@@ -2932,63 +2948,326 @@ def detect_strong_reversal(candles, current_price, ema9, ema26, previous_ema9, p
 # It detects common SMC structure/liquidity/imbalance conditions and adds
 # fields to each signal. It does NOT replace or modify the core signal score.
 # ============================================================
+def _smc_aggregate_candles(candles, minutes=5):
+    """Aggregate 1-minute OHLC candles into closed higher-timeframe bars.
+
+    This is deliberately local: it does not add another market-data request,
+    which keeps the Free Render instance light. Only completed groups are used.
+    """
+    if minutes <= 1:
+        return list(candles)
+    out = []
+    bucket = []
+    current_bucket = None
+    for item in candles:
+        raw_dt = item.get("datetime")
+        try:
+            dt = datetime.datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            continue
+        key = int(dt.timestamp() // (minutes * 60))
+        if current_bucket is None:
+            current_bucket = key
+        if key != current_bucket:
+            if len(bucket) == minutes:
+                out.append({
+                    "datetime": bucket[0]["datetime"],
+                    "open": bucket[0]["open"],
+                    "high": max(x["high"] for x in bucket),
+                    "low": min(x["low"] for x in bucket),
+                    "close": bucket[-1]["close"],
+                })
+            bucket = []
+            current_bucket = key
+        bucket.append(item)
+    # Do not use a partial higher-timeframe candle.
+    if len(bucket) == minutes:
+        out.append({
+            "datetime": bucket[0]["datetime"],
+            "open": bucket[0]["open"],
+            "high": max(x["high"] for x in bucket),
+            "low": min(x["low"] for x in bucket),
+            "close": bucket[-1]["close"],
+        })
+    return out
+
+
+def _smc_confirmed_pivots(candles, left=2, right=2):
+    """Return confirmed swing highs/lows.
+
+    A pivot is only accepted after `right` later candles exist. This prevents
+    the SMC detector from treating an unconfirmed turning point as structure.
+    """
+    swing_highs = []
+    swing_lows = []
+    if len(candles) < left + right + 1:
+        return swing_highs, swing_lows
+    highs = [float(x["high"]) for x in candles]
+    lows = [float(x["low"]) for x in candles]
+    for i in range(left, len(candles) - right):
+        h = highs[i]
+        lo = lows[i]
+        left_highs = highs[i-left:i]
+        right_highs = highs[i+1:i+1+right]
+        left_lows = lows[i-left:i]
+        right_lows = lows[i+1:i+1+right]
+        if h > max(left_highs) and h >= max(right_highs):
+            swing_highs.append((i, h))
+        if lo < min(left_lows) and lo <= min(right_lows):
+            swing_lows.append((i, lo))
+    return swing_highs, swing_lows
+
+
+def _smc_displacement(candle, atr):
+    if not candle or atr <= 0:
+        return False
+    rng = max(0.0, float(candle["high"]) - float(candle["low"]))
+    body = abs(float(candle["close"]) - float(candle["open"]))
+    if rng <= 0:
+        return False
+    return body / rng >= 0.60 and rng >= atr * 1.20
+
+
 def detect_smc(candles, direction=None):
-    if len(candles) < 12:
+    """Independent SMC detector for Auto-Trader.
+
+    The detector is intentionally additive: it never changes the core KETS
+    signal. It uses only closed 1-minute candles, confirmed swing structure,
+    BOS/CHoCH, liquidity sweeps, fresh FVGs, displacement/order-block proxies,
+    and premium/discount location. A small 5-minute structure check is derived
+    from the same candles so no extra API request is required.
+    """
+    if len(candles) < 35:
+        return {
+            "confirmed": False, "direction": None, "score": 0,
+            "reasons": [], "components": {}
+        }
+
+    # Twelve Data can return the currently forming 1-minute candle. SMC
+    # structure is evaluated on the latest completed candle to avoid using a
+    # candle that can still change.
+    closed = list(candles[:-1]) if len(candles) > 35 else list(candles)
+    if len(closed) < 30:
+        return {
+            "confirmed": False, "direction": None, "score": 0,
+            "reasons": [], "components": {}
+        }
+
+    highs = [float(x["high"]) for x in closed]
+    lows = [float(x["low"]) for x in closed]
+    opens = [float(x.get("open", x["close"])) for x in closed]
+    closes = [float(x["close"]) for x in closed]
+
+    # ATR used only as a scale filter for displacement/FVG quality.
+    tr = []
+    for i in range(1, len(closed)):
+        tr.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i-1]),
+            abs(lows[i] - closes[i-1]),
+        ))
+    if len(tr) < 14:
         return {"confirmed": False, "direction": None, "score": 0, "reasons": [], "components": {}}
-    c = candles
-    highs=[float(x.get("high",0)) for x in c]
-    lows=[float(x.get("low",0)) for x in c]
-    closes=[float(x.get("close",0)) for x in c]
-    # Recent swing points: simple 5-candle pivots.
-    swing_highs=[]; swing_lows=[]
-    for i in range(2, len(c)-2):
-        if highs[i] > highs[i-1] and highs[i] >= highs[i+1] and highs[i] > highs[i-2] and highs[i] >= highs[i+2]: swing_highs.append((i,highs[i]))
-        if lows[i] < lows[i-1] and lows[i] <= lows[i+1] and lows[i] < lows[i-2] and lows[i] <= lows[i+2]: swing_lows.append((i,lows[i]))
-    sh=swing_highs[-3:]; sl=swing_lows[-3:]
-    last=c[-1]; prev=c[-2]
-    recent_high=max([x[1] for x in sh], default=max(highs[-8:-2]))
-    recent_low=min([x[1] for x in sl], default=min(lows[-8:-2]))
-    # Liquidity sweep: wick takes a recent swing, close returns back inside.
-    buy_side_sweep=highs[-1] > recent_high and closes[-1] < recent_high
-    sell_side_sweep=lows[-1] < recent_low and closes[-1] > recent_low
-    # BOS: close breaks the most recent swing level.
-    bullish_bos=closes[-1] > recent_high
-    bearish_bos=closes[-1] < recent_low
-    # FVG: three-candle imbalance.
-    bullish_fvg=lows[-1] > highs[-3]
-    bearish_fvg=highs[-1] < lows[-3]
-    # Order-block proxy: last opposite candle before current displacement.
-    bullish_ob=False; bearish_ob=False
-    if len(c)>=4:
-        bullish_ob=(closes[-3] < float(c[-3].get('open',closes[-3]))) and closes[-1] > highs[-3]
-        bearish_ob=(closes[-3] > float(c[-3].get('open',closes[-3]))) and closes[-1] < lows[-3]
-    # Structure direction from latest two pivots.
-    structure_bull=bool(len(sh)>=2 and len(sl)>=2 and sh[-1][1] >= sh[-2][1] and sl[-1][1] >= sl[-2][1])
-    structure_bear=bool(len(sh)>=2 and len(sl)>=2 and sh[-1][1] <= sh[-2][1] and sl[-1][1] <= sl[-2][1])
-    bull_points=sum([bullish_bos, sell_side_sweep, bullish_fvg, bullish_ob, structure_bull])
-    bear_points=sum([bearish_bos, buy_side_sweep, bearish_fvg, bearish_ob, structure_bear])
-    chosen=(str(direction or '').upper())
-    if chosen=='BUY': points=bull_points; confirmed=points>=2; reasons=[]
-    elif chosen=='SELL': points=bear_points; confirmed=points>=2; reasons=[]
+    atr = sum(tr[-14:]) / 14.0
+
+    swing_highs, swing_lows = _smc_confirmed_pivots(closed, 2, 2)
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return {"confirmed": False, "direction": None, "score": 0, "reasons": [], "components": {}}
+
+    last_sh_idx, last_sh = swing_highs[-1]
+    prev_sh_idx, prev_sh = swing_highs[-2]
+    last_sl_idx, last_sl = swing_lows[-1]
+    prev_sl_idx, prev_sl = swing_lows[-2]
+
+    structure_bull = last_sh > prev_sh and last_sl > prev_sl
+    structure_bear = last_sh < prev_sh and last_sl < prev_sl
+    prior_structure = "BULLISH" if structure_bull else ("BEARISH" if structure_bear else "RANGE")
+
+    current = closed[-1]
+    previous = closed[-2]
+
+    # BOS requires a close through a confirmed swing and a previous close on
+    # the other side. CHoCH is a BOS against the prior confirmed structure.
+    bullish_bos = closes[-1] > last_sh and closes[-2] <= last_sh
+    bearish_bos = closes[-1] < last_sl and closes[-2] >= last_sl
+    bullish_choch = bullish_bos and prior_structure == "BEARISH"
+    bearish_choch = bearish_bos and prior_structure == "BULLISH"
+
+    # Liquidity sweeps: wick through a confirmed external swing, then close
+    # back inside. The swing itself is excluded from the sweep comparison.
+    sell_side_sweep = lows[-1] < last_sl and closes[-1] > last_sl
+    buy_side_sweep = highs[-1] > last_sh and closes[-1] < last_sh
+
+    # Fresh three-candle imbalance on the latest completed candle.
+    bullish_gap = lows[-1] - highs[-3]
+    bearish_gap = lows[-3] - highs[-1]
+    bullish_fvg = bullish_gap > max(atr * 0.10, 1e-12)
+    bearish_fvg = bearish_gap > max(atr * 0.10, 1e-12)
+
+    # Displacement is a meaningful body/range expansion, not merely a close
+    # above one candle.
+    displacement_bull = (
+        closes[-1] > opens[-1] and _smc_displacement(current, atr)
+    )
+    displacement_bear = (
+        closes[-1] < opens[-1] and _smc_displacement(current, atr)
+    )
+
+    # Order-block proxy: the latest opposite candle before a displacement
+    # move that subsequently broke its high/low. This is more selective than
+    # treating candle[-3] as an order block unconditionally.
+    bullish_ob = False
+    bearish_ob = False
+    bullish_ob_index = None
+    bearish_ob_index = None
+    search_start = max(0, len(closed) - 9)
+    for i in range(len(closed) - 2, search_start - 1, -1):
+        if displacement_bull and closes[i] < opens[i]:
+            if closes[-1] > highs[i]:
+                bullish_ob = True
+                bullish_ob_index = i
+                break
+        if displacement_bear and closes[i] > opens[i]:
+            if closes[-1] < lows[i]:
+                bearish_ob = True
+                bearish_ob_index = i
+                break
+
+    # Premium/discount is measured from the most recent confirmed dealing
+    # range. It is a location filter, not a standalone signal.
+    range_high = max(last_sh, last_sl)
+    range_low = min(last_sh, last_sl)
+    midpoint = (range_high + range_low) / 2.0
+    in_discount = closes[-1] < midpoint
+    in_premium = closes[-1] > midpoint
+
+    # Small higher-timeframe structure check, derived locally from 1m data.
+    c5 = _smc_aggregate_candles(closed, 5)
+    h5, l5 = _smc_confirmed_pivots(c5, 1, 1)
+    htf_bull = False
+    htf_bear = False
+    if len(h5) >= 2 and len(l5) >= 2:
+        htf_bull = h5[-1][1] > h5[-2][1] and l5[-1][1] > l5[-2][1]
+        htf_bear = h5[-1][1] < h5[-2][1] and l5[-1][1] < l5[-2][1]
+
+    bull_points = 0
+    bear_points = 0
+    bull_reasons = []
+    bear_reasons = []
+
+    if structure_bull:
+        bull_points += 15; bull_reasons.append("Bullish HH + HL structure")
+    if structure_bear:
+        bear_points += 15; bear_reasons.append("Bearish LH + LL structure")
+    if bullish_bos:
+        bull_points += 25; bull_reasons.append("Bullish BOS")
+    if bearish_bos:
+        bear_points += 25; bear_reasons.append("Bearish BOS")
+    if bullish_choch:
+        bull_points += 10; bull_reasons.append("Bullish CHoCH")
+    if bearish_choch:
+        bear_points += 10; bear_reasons.append("Bearish CHoCH")
+    if sell_side_sweep:
+        bull_points += 20; bull_reasons.append("Sell-side liquidity sweep")
+    if buy_side_sweep:
+        bear_points += 20; bear_reasons.append("Buy-side liquidity sweep")
+    if bullish_fvg:
+        bull_points += 15; bull_reasons.append("Fresh bullish FVG")
+    if bearish_fvg:
+        bear_points += 15; bear_reasons.append("Fresh bearish FVG")
+    if bullish_ob:
+        bull_points += 15; bull_reasons.append("Bullish order-block reaction")
+    if bearish_ob:
+        bear_points += 15; bear_reasons.append("Bearish order-block reaction")
+    if displacement_bull:
+        bull_points += 10; bull_reasons.append("Bullish displacement")
+    if displacement_bear:
+        bear_points += 10; bear_reasons.append("Bearish displacement")
+    if in_discount:
+        bull_points += 10; bull_reasons.append("Price in discount")
+    if in_premium:
+        bear_points += 10; bear_reasons.append("Price in premium")
+    if htf_bull:
+        bull_points += 10; bull_reasons.append("5M structure bullish")
+    if htf_bear:
+        bear_points += 10; bear_reasons.append("5M structure bearish")
+
+    bull_score = min(100, bull_points)
+    bear_score = min(100, bear_points)
+
+    requested = str(direction or "").upper()
+    if requested in ("BUY", "SELL"):
+        chosen = requested
+        score = bull_score if chosen == "BUY" else bear_score
+    elif bull_score > bear_score:
+        chosen, score = "BUY", bull_score
+    elif bear_score > bull_score:
+        chosen, score = "SELL", bear_score
     else:
-        chosen='BUY' if bull_points>bear_points else ('SELL' if bear_points>bull_points else None)
-        points=max(bull_points,bear_points); confirmed=points>=2; reasons=[]
-    if chosen=='BUY':
-        if bullish_bos: reasons.append('Bullish BOS')
-        if sell_side_sweep: reasons.append('Sell-side liquidity sweep')
-        if bullish_fvg: reasons.append('Bullish FVG')
-        if bullish_ob: reasons.append('Bullish order-block reaction')
-        if structure_bull: reasons.append('Bullish market structure')
-    elif chosen=='SELL':
-        if bearish_bos: reasons.append('Bearish BOS')
-        if buy_side_sweep: reasons.append('Buy-side liquidity sweep')
-        if bearish_fvg: reasons.append('Bearish FVG')
-        if bearish_ob: reasons.append('Bearish order-block reaction')
-        if structure_bear: reasons.append('Bearish market structure')
+        chosen, score = None, 0
+
+    # Confirmation is deliberately stricter than simply reaching a numeric
+    # score. A structure event or liquidity sweep must be present, plus another
+    # independent SMC component.
+    if chosen == "BUY":
+        structural_event = bullish_bos or bullish_choch or sell_side_sweep
+        independent = sum([
+            structure_bull, bullish_fvg, bullish_ob,
+            displacement_bull, in_discount, htf_bull
+        ])
+        confirmed = bool(score >= 60 and structural_event and independent >= 1)
+        reasons = bull_reasons
+    elif chosen == "SELL":
+        structural_event = bearish_bos or bearish_choch or buy_side_sweep
+        independent = sum([
+            structure_bear, bearish_fvg, bearish_ob,
+            displacement_bear, in_premium, htf_bear
+        ])
+        confirmed = bool(score >= 60 and structural_event and independent >= 1)
+        reasons = bear_reasons
+    else:
+        confirmed = False
+        reasons = []
+
+    components = {
+        "structure_bull": bool(structure_bull),
+        "structure_bear": bool(structure_bear),
+        "bullish_bos": bool(bullish_bos),
+        "bearish_bos": bool(bearish_bos),
+        "bullish_choch": bool(bullish_choch),
+        "bearish_choch": bool(bearish_choch),
+        "sell_side_sweep": bool(sell_side_sweep),
+        "buy_side_sweep": bool(buy_side_sweep),
+        "bullish_fvg": bool(bullish_fvg),
+        "bearish_fvg": bool(bearish_fvg),
+        "bullish_ob": bool(bullish_ob),
+        "bearish_ob": bool(bearish_ob),
+        "bullish_displacement": bool(displacement_bull),
+        "bearish_displacement": bool(displacement_bear),
+        "in_discount": bool(in_discount),
+        "in_premium": bool(in_premium),
+        "htf_5m_bull": bool(htf_bull),
+        "htf_5m_bear": bool(htf_bear),
+        "prior_structure": prior_structure,
+        "last_swing_high": last_sh,
+        "last_swing_low": last_sl,
+        "range_midpoint": midpoint,
+        "atr": atr,
+        "bull_score": bull_score,
+        "bear_score": bear_score,
+        "bullish_ob_index": bullish_ob_index,
+        "bearish_ob_index": bearish_ob_index,
+        "evaluated_on_closed_candle": True,
+    }
+
     return {
-        'confirmed': bool(confirmed), 'direction': chosen, 'score': int(min(100, points*20)),
-        'reasons': reasons,
-        'components': {'bullish_bos':bool(bullish_bos),'bearish_bos':bool(bearish_bos),'buy_side_sweep':bool(buy_side_sweep),'sell_side_sweep':bool(sell_side_sweep),'bullish_fvg':bool(bullish_fvg),'bearish_fvg':bool(bearish_fvg),'bullish_ob':bool(bullish_ob),'bearish_ob':bool(bearish_ob),'structure_bull':bool(structure_bull),'structure_bear':bool(structure_bear)}
+        "confirmed": bool(confirmed),
+        "direction": chosen,
+        "score": int(score),
+        "reasons": reasons,
+        "components": components,
     }
 
 
@@ -3738,6 +4017,18 @@ def analyze_market(
         atr, adx, plus_di, minus_di, vwap, previous_ema9, previous_ema26
     )
 
+    # SMC is an independent Auto-Trader signal source. It is deliberately
+    # separate from the normal KETS strategy/strong-reversal signal.
+    smc_candidate = detect_smc(candles, None)
+    if bool(smc_candidate.get("confirmed")) and smc_candidate.get("direction") in ("BUY", "SELL"):
+        strategy_signals["smc"] = {
+            "confirmed": True,
+            "direction": str(smc_candidate.get("direction")).upper(),
+            "score": int(max(0, min(100, float(smc_candidate.get("score") or 0)))),
+            "reasons": list(smc_candidate.get("reasons") or []),
+            "components": dict(smc_candidate.get("components") or {}),
+        }
+
     # ========================================================
     # HIGHER TIMEFRAME CONTEXT
     # ========================================================
@@ -3782,17 +4073,18 @@ def analyze_market(
     smc = detect_smc(candles, signal_type)
     smc_only_signal = False
 
-    if reversal_signal:
+    # SMC is the default strategy. If SMC does not confirm, preserve the
+    # existing KETS/strong-reversal logic exactly as the fallback.
+    if bool(smc.get("confirmed")) and smc.get("direction") in ("BUY", "SELL"):
+        signal_type = smc["direction"]
+        core_score = smc.get("score", 0)
+        reasons = ["SMC AUTO-TRADER ENTRY"] + list(smc.get("reasons") or [])
+        smc_only_signal = True
+    elif reversal_signal:
         signal_type = reversal["direction"]
         core_score = reversal["score"]
         reasons = reversal["reasons"]
     elif signal_type is None:
-        if bool(smc.get("confirmed")) and smc.get("direction") in ("BUY", "SELL"):
-            signal_type = smc["direction"]
-            core_score = smc.get("score", 0)
-            reasons = ["SMC AUTO-TRADER ENTRY"] + list(smc.get("reasons") or [])
-            smc_only_signal = True
-        else:
             # Preserve independent strategy results even when the core KETS
             # setup does not qualify, so the caller does not recalculate the
             # entire indicator stack a second time.
@@ -4765,6 +5057,12 @@ def analyze_market(
     # API REQUIRES THE PUBLIC SIGNAL FIELDS BELOW.
     # ========================================================
 
+    if "smc" in strategy_signals and isinstance(strategy_signals.get("smc"), dict):
+        strategy_signals["smc"].update({
+            "entry": entry, "market_price": entry,
+            "take_profit": take_profit, "stop_loss": stop_loss,
+        })
+
     return {
 
         "bot":
@@ -4837,8 +5135,8 @@ def analyze_market(
         "telegram_bot_message": bot_message,
         "telegram_channel_message": channel_message,
 
-        # SMC is an additive Auto-Trader feature. It is OFF by default and
-        # does not alter the existing signal strategy.
+        # SMC is the default strategy. Existing KETS/strong-reversal logic
+        # remains the fallback when SMC does not confirm.
         "smc_confirmed": bool(smc.get("confirmed")),
         "smc_direction": smc.get("direction"),
         "smc_score": smc.get("score", 0),
@@ -4848,8 +5146,7 @@ def analyze_market(
         "smc_components": smc.get("components", {}),
 
 
-        # Independent strategy candidates for KETS Auto-Trader controls.
-        "available_strategies": list(ADDITIONAL_STRATEGIES.keys()),
+        "available_strategies": list(ADDITIONAL_STRATEGIES.keys()) + (["smc"] if "smc" not in ADDITIONAL_STRATEGIES else []),
         "strategy_signals": strategy_signals,
 
         "timestamp":
