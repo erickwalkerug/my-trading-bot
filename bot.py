@@ -486,6 +486,20 @@ def save_signal_for_api(
             "ACTIVE"
     }
 
+    # Preserve the independent SMC source identity in the signal payload
+    # itself. KETS also stamps the POST /api/signals ingress, but keeping the
+    # marker here means Signal History remains explicitly recognizable as SMC
+    # even when the payload is inspected from persistence or another consumer.
+    if bool(signal.get("smc_only_signal")):
+        api_signal.update({
+            "is_smc_signal": True,
+            "signal_source": "smc",
+            "source": "smc",
+            "source_type": "independent_smc",
+            "strategy": "smc",
+            "strategy_name": "smc",
+        })
+
     with signal_lock:
         signal_history.append(api_signal)
         # Hard RAM ceiling for the in-process cache. The full 2-day history
