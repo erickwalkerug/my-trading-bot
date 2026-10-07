@@ -1,0 +1,9 @@
+KETS SMC DIRECT EXECUTION — 2026-10-07
+
+Changes in this build:
+- SMC is evaluated only in the trading bot from its existing 1-minute candle snapshot.
+- The SMC decision requires the structural sequence: liquidity sweep -> displacement -> BOS/CHOCH -> order block -> OB retest -> premium/discount -> direction confirmation.
+- The latest forming candle is excluded from structural confirmation.
+- The SMC result is evaluated once and reused; it is not vetoed by the normal KETS strategy direction.
+- The bot continues to send the SMC direction, entry, take-profit and stop-loss to KETS.
+- No KETS-side SMC candle fetch or duplicate SMC structure gate is required.
