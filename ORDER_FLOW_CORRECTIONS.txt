@@ -1,0 +1,9 @@
+INDEPENDENT CANDLE-PRESSURE ORDER-FLOW PROXY
+
+This bot independently calculates a directional pressure estimate from its already-fetched OHLC candles and posts each scan to KETS /api/order-flow using KETS_SIGNAL_SOURCE_URL and the configured KETS API key. It does not make an additional market-data request for the proxy.
+
+The result is explicitly labelled CANDLE_BASED_PRESSURE_PROXY and is not actual bid/ask volume, aggressor flow, or verified absorption. The KETS receiver stores this separately from signal history; signal history retention remains controlled by KETS Main.
+
+Schedule preserved: Monday-Friday GOLD only, 06:00-18:00 EAT; Saturday-Sunday fully offline.
+
+Before live use, set KETS_SIGNAL_SOURCE_URL to the actual KETS deployment endpoint and ensure the bot's KETS_SIGNAL_SOURCE_KEY (or KETS_API_KEY) matches KETS_SIGNAL_RECEIVER_KEY / KETS API receiver configuration. Check Render logs for successful HTTP delivery and test in a cTrader demo account first.
