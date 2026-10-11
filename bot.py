@@ -2752,6 +2752,91 @@ def get_strength_interpretation(
     )
 
 
+def calculate_candle_pressure_proxy(candles, asset, symbol, price):
+    """Estimate directional pressure from OHLC only; this is NOT true order flow."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Exclude the last candle as it may still be forming; reuse existing market data.
+    sample = list(candles[:-1] if len(candles) > 2 else candles)[-20:]
+    bullish_weight = 0.0
+    bearish_weight = 0.0
+    usable = 0
+    for candle in sample:
+        try:
+            o = float(candle.get("open", candle.get("close")))
+            h = float(candle["high"])
+            lo = float(candle["low"])
+            c = float(candle["close"])
+            rng = h - lo
+            if not all(math.isfinite(v) for v in (o, h, lo, c)) or rng <= 0:
+                continue
+            body = (c - o) / rng
+            close_location = ((c - lo) / rng) * 2.0 - 1.0
+            # Body direction plus close location, clipped to avoid one candle dominating.
+            score = max(-1.0, min(1.0, 0.65 * body + 0.35 * close_location))
+            if score >= 0:
+                bullish_weight += score
+            else:
+                bearish_weight += abs(score)
+            usable += 1
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+    total = bullish_weight + bearish_weight
+    if usable < 5 or total <= 0:
+        bullish = bearish = 50.0
+        direction = "WAIT"
+        quality = "INSUFFICIENT_CANDLE_EVIDENCE"
+    else:
+        bullish = round(100.0 * bullish_weight / total, 1)
+        bearish = round(100.0 * bearish_weight / total, 1)
+        if bullish >= 57.0 and bullish - bearish >= 14.0:
+            direction = "BUY"
+        elif bearish >= 57.0 and bearish - bullish >= 14.0:
+            direction = "SELL"
+        else:
+            direction = "WAIT"
+        quality = "CANDLE_PROXY_ESTIMATE"
+    return {
+        "id": f"FLOW-{str(asset).upper()}-{int(now.timestamp() * 1000)}",
+        "asset": str(asset).upper(), "symbol": str(symbol), "market_price": float(price),
+        "direction": direction, "bullish_pressure": bullish, "bearish_pressure": bearish,
+        "candle_count_used": usable, "data_type": "CANDLE_BASED_PRESSURE_PROXY",
+        "data_quality": quality,
+        "disclaimer": "Estimated from OHLC candle bodies, close location and wicks. Not actual bid/ask volume, aggressor flow or confirmed absorption.",
+        "timestamp_utc": now.isoformat(),
+    }
+
+
+def send_order_flow_to_kets_website(order_flow):
+    """Send each candle-pressure proxy scan to KETS order-flow history."""
+    if not KETS_SIGNAL_SOURCE_URL or not order_flow:
+        return False
+    base = KETS_SIGNAL_SOURCE_URL.rstrip("/")
+    if base.endswith("/api/signals"):
+        url = base[:-len("/api/signals")] + "/api/order-flow"
+    elif base.endswith("/api/smc-signals"):
+        url = base[:-len("/api/smc-signals")] + "/api/order-flow"
+    elif base.endswith("/api/order-flow"):
+        url = base
+    else:
+        url = base + "/api/order-flow"
+    try:
+        last_response = None
+        for auth_key in (_kets_auth_keys() or [""]):
+            headers = {"Content-Type": "application/json"}
+            if auth_key:
+                headers["X-KETS-API-KEY"] = auth_key
+            last_response = HTTP_SESSION.post(url, json=order_flow, headers=headers, timeout=12)
+            if 200 <= last_response.status_code < 300:
+                print(f"🌊 KETS candle-pressure proxy delivered: {order_flow.get('asset')} {order_flow.get('direction')} HTTP {last_response.status_code}")
+                return True
+            if last_response.status_code != 401:
+                break
+        print(f"⚠️ KETS order-flow delivery rejected: HTTP {last_response.status_code if last_response else 'N/A'} {last_response.text[:200] if last_response else ''}")
+    except requests.RequestException as exc:
+        print(f"⚠️ KETS order-flow delivery failed: {exc}")
+    return False
+
+
 # ============================================================
 # TWELVE DATA
 # ============================================================
@@ -5501,6 +5586,16 @@ def run_strategy():
                 # =============================================
 
                 price = candles[-1]["close"]
+
+                # Calculate and publish a clearly labelled OHLC pressure proxy
+                # on every successful market scan, even when no trade signal forms.
+                # This does not request additional Twelve Data calls and does not
+                # alter the existing strategy signal calculation.
+                try:
+                    order_flow_proxy = calculate_candle_pressure_proxy(candles, asset, symbol, price)
+                    send_order_flow_to_kets_website(order_flow_proxy)
+                except Exception as flow_exc:
+                    print(f"⚠️ Candle-pressure proxy skipped for {asset}: {str(flow_exc)[:240]}")
 
                 print(
                     f"💵 {asset}: "
