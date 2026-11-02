@@ -1,0 +1,7 @@
+FRVP CANDLE FORWARDING FIX — 2026-11-02
+
+The bot now attaches up to 100 completed OHLC candles to each existing Order Flow proxy record, using the market data already fetched for that scan. This adds no new market-data API call. Positive provider volume is forwarded when available; missing or non-positive volume is omitted rather than fabricated.
+
+This is a provider-volume feed, not a guarantee of true exchange tick volume. FRVP requires at least 12 valid candles with positive volume. If the Twelve Data XAUUSD feed omits volume, use a genuine cTrader tick-volume source before expecting POC calculations to complete.
+
+Existing signal generation and trading execution rules are not changed by this patch.

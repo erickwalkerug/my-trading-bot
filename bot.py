@@ -2795,13 +2795,37 @@ def calculate_candle_pressure_proxy(candles, asset, symbol, price):
         else:
             direction = "WAIT"
         quality = "CANDLE_PROXY_ESTIMATE"
+    # Forward the completed market candles already fetched for this scan. This
+    # reuses the existing Twelve Data request (no additional API calls). Volume
+    # is passed through only when the provider supplied a positive value; it is
+    # never fabricated or relabelled as exchange-traded/tick volume.
+    completed = list(candles[:-1] if len(candles) > 2 else candles)[-100:]
+    frvp_candles = []
+    for candle in completed:
+        try:
+            row = {
+                "timestamp": str(candle.get("datetime") or candle.get("timestamp") or ""),
+                "open": float(candle["open"]),
+                "high": float(candle["high"]),
+                "low": float(candle["low"]),
+                "close": float(candle["close"]),
+            }
+            raw_volume = candle.get("volume")
+            if raw_volume is not None and math.isfinite(float(raw_volume)) and float(raw_volume) > 0:
+                row["volume"] = float(raw_volume)
+            frvp_candles.append(row)
+        except (KeyError, TypeError, ValueError):
+            continue
+
     return {
         "id": f"FLOW-{str(asset).upper()}-{int(now.timestamp() * 1000)}",
         "asset": str(asset).upper(), "symbol": str(symbol), "market_price": float(price),
         "direction": direction, "bullish_pressure": bullish, "bearish_pressure": bearish,
         "candle_count_used": usable, "data_type": "CANDLE_BASED_PRESSURE_PROXY",
         "data_quality": quality,
-        "disclaimer": "Estimated from OHLC candle bodies, close location and wicks. Not actual bid/ask volume, aggressor flow or confirmed absorption.",
+        "candles": frvp_candles,
+        "candle_volume_source": "TWELVE_DATA_VOLUME_FIELD" if any("volume" in c for c in frvp_candles) else "UNAVAILABLE",
+        "disclaimer": "Pressure is estimated from OHLC candle bodies, close location and wicks. FRVP volume is passed through from the provider when available; it is not guaranteed to be true exchange tick volume, bid/ask volume, or aggressor flow.",
         "timestamp_utc": now.isoformat(),
     }
 
