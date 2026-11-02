@@ -2862,12 +2862,169 @@ def send_order_flow_to_kets_website(order_flow):
 
 
 # ============================================================
+# V16 GOLD / DXY FEED
+# ============================================================
+V16_LAST_DXY_CANDLES = []
+V16_LAST_DXY_FETCH = 0.0
+V16_LAST_GOLD_CANDLES = []
+V16_LAST_GOLD_FETCH = 0.0
+V16_DXY_SYMBOL = os.environ.get("INFOWAY_DXY_SYMBOL", "DXY").strip() or "DXY"
+V16_DXY_FETCH_SECONDS = 120  # Refresh both providers on the same 2-minute scan cadence.
+INFOWAY_KLINE_URL = "https://data.infoway.io/common/v2/batch_kline"
+
+
+def fetch_infoway_dxy_1m_candles(api_key, outputsize=500):
+    # Fetch DXY 1-minute OHLCV candles from Infoway documented common API.
+    if not api_key:
+        print("❌ INFOWAY_API_KEY is missing; V16 DXY feed is disabled.")
+        return []
+    payload = {
+        "klineType": 1,  # Infoway: 1 = 1 minute
+        "klineNum": max(1, min(int(outputsize or 500), 500)),
+        "codes": V16_DXY_SYMBOL,
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "apiKey": api_key,
+    }
+    try:
+        response = HTTP_SESSION.post(
+            INFOWAY_KLINE_URL, json=payload, headers=headers, timeout=20
+        )
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict) or int(body.get("ret", 0) or 0) != 200:
+            raise ValueError("Infoway returned an unsuccessful response: " + str(body.get("msg", "unknown error"))[:180])
+        data = body.get("data") or []
+        instrument = next((item for item in data if str(item.get("s", "")).upper() == V16_DXY_SYMBOL.upper()), None)
+        if instrument is None and len(data) == 1:
+            instrument = data[0]
+        if not isinstance(instrument, dict):
+            raise ValueError("Infoway response did not contain the requested DXY instrument")
+        rows = instrument.get("respList") or []
+        candles = []
+        for row in rows:
+            try:
+                raw_stamp = float(row.get("t"))
+                # Infoway's documented kline example uses Unix seconds.
+                if raw_stamp > 10**12:
+                    raw_stamp /= 1000.0
+                stamp = datetime.datetime.fromtimestamp(raw_stamp, datetime.timezone.utc)
+                candle = {
+                    "datetime": stamp.isoformat(),
+                    "open": float(row["o"]),
+                    "high": float(row["h"]),
+                    "low": float(row["l"]),
+                    "close": float(row["c"]),
+                }
+                if row.get("v") is not None:
+                    candle["volume"] = float(row["v"])
+                if candle["high"] < candle["low"] or candle["open"] <= 0 or candle["close"] <= 0:
+                    continue
+                candles.append(candle)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+        # Infoway returns newest-first; V16 aggregation requires chronological order.
+        candles.sort(key=lambda item: item["datetime"])
+        if not candles:
+            raise ValueError("Infoway returned no valid DXY candles")
+        return candles[-max(1, min(int(outputsize or 500), 500)):]
+    except Exception as exc:
+        print(f"⚠️ Infoway DXY request failed: {str(exc)[:240]}")
+        return []
+
+def _v16_aggregate(candles, minutes):
+    """Aggregate completed 1-minute candles into M5/M15 OHLC candles."""
+    import datetime as _dt
+    buckets = {}
+    for c in candles or []:
+        try:
+            stamp = _dt.datetime.fromisoformat(str(c.get('datetime')).replace('Z','+00:00'))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=_dt.timezone.utc)
+            epoch = int(stamp.timestamp())
+            start = epoch - (epoch % (minutes * 60))
+            buckets.setdefault(start, []).append(c)
+        except Exception:
+            continue
+    out = []
+    for start in sorted(buckets):
+        group = buckets[start]
+        if len(group) < minutes:
+            continue
+        out.append({'datetime': _dt.datetime.fromtimestamp(start, _dt.timezone.utc).isoformat(),
+                    'open': float(group[0]['open']), 'high': max(float(x['high']) for x in group),
+                    'low': min(float(x['low']) for x in group), 'close': float(group[-1]['close'])})
+    return out
+
+def _v16_market_read(candles):
+    """Return conservative direction and prior-20-bar support/resistance break."""
+    m5 = _v16_aggregate(candles, 5)
+    m15 = _v16_aggregate(candles, 15)
+    def read(bars):
+        if len(bars) < 22:
+            return {'direction':'UNKNOWN','support':None,'resistance':None,'break':'NONE','last':bars[-1]['close'] if bars else None}
+        closed = bars[:-1]  # ignore the still-forming higher-timeframe bar
+        recent = closed[-1]
+        prior = closed[-21:-1]
+        support = min(float(x['low']) for x in prior)
+        resistance = max(float(x['high']) for x in prior)
+        # Direction uses the net move across the last three completed bars,
+        # reducing sensitivity to a single small candle.
+        trend_open = float(closed[-3]['open']) if len(closed) >= 3 else float(recent['open'])
+        trend_close = float(recent['close'])
+        direction = 'BULLISH' if trend_close > trend_open else ('BEARISH' if trend_close < trend_open else 'NEUTRAL')
+        brk = 'RESISTANCE' if float(recent['close']) > resistance else ('SUPPORT' if float(recent['close']) < support else 'NONE')
+        return {'direction':direction,'support':support,'resistance':resistance,'break':brk,'last':float(recent['close'])}
+    return {'m5':read(m5),'m15':read(m15),'m5_bars':len(m5),'m15_bars':len(m15)}
+
+def send_v16_market_to_kets(gold_candles, dxy_candles):
+    if not gold_candles or not dxy_candles or not KETS_SIGNAL_SOURCE_URL:
+        return False
+    gold = _v16_market_read(gold_candles)
+    dxy = _v16_market_read(dxy_candles)
+    gd = gold['m5']['direction']; dd = dxy['m5']['direction']
+    opposite = (gd == 'BULLISH' and dd == 'BEARISH') or (gd == 'BEARISH' and dd == 'BULLISH')
+    buy_break = gold['m5']['break'] == 'RESISTANCE' and dxy['m5']['break'] == 'SUPPORT'
+    sell_break = gold['m5']['break'] == 'SUPPORT' and dxy['m5']['break'] == 'RESISTANCE'
+    signal = 'BUY' if ((opposite and gd == 'BULLISH') or buy_break) else ('SELL' if ((opposite and gd == 'BEARISH') or sell_break) else None)
+    payload = {'id': 'V16-' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M'),
+        'timestamp_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'source_data_timestamp_utc':min(
+            datetime.datetime.fromisoformat(str(gold_candles[-1]['datetime']).replace('Z','+00:00')),
+            datetime.datetime.fromisoformat(str(dxy_candles[-1]['datetime']).replace('Z','+00:00'))
+        ).astimezone(datetime.timezone.utc).isoformat(),
+        'source':'V16_GOLD_DXY','gold_source':'TWELVE_DATA','dxy_source':'INFOWAY','gold':gold,'dxy':dxy,'signal':signal,
+        'opposite_movement':bool(opposite),'paired_breakout':bool(buy_break or sell_break),
+        'same_direction':bool(gd == dd and gd in ('BULLISH','BEARISH')),
+        'gold_price':float(gold_candles[-1]['close']),'dxy_price':float(dxy_candles[-1]['close']),'dxy_symbol':V16_DXY_SYMBOL,'gold_symbol':'XAU/USD',
+        'timeframes':['M1','M5','M15']}
+    url=KETS_SIGNAL_SOURCE_URL.rstrip('/')
+    if url.endswith('/api/signals'): url=url[:-len('/api/signals')]+'/api/v16-market'
+    else: url += '/api/v16-market'
+    for key in (_kets_auth_keys() or ['']):
+        try:
+            headers={'Content-Type':'application/json'}
+            if key: headers['X-KETS-API-KEY']=key
+            resp=HTTP_SESSION.post(url,json=payload,headers=headers,timeout=12)
+            if 200 <= resp.status_code < 300:
+                print('V16 Gold/DXY snapshot delivered to KETS')
+                return True
+            if resp.status_code != 401: break
+        except requests.RequestException as exc:
+            print(f'V16 feed delivery failed: {exc}')
+            break
+    return False
+
+# ============================================================
 # TWELVE DATA
 # ============================================================
 
 def fetch_1m_candles(
     symbol,
-    api_key
+    api_key,
+    outputsize=100
 ):
 
     if not api_key:
@@ -2893,7 +3050,7 @@ def fetch_1m_candles(
             "1min",
 
         "outputsize":
-            100,
+            max(1, min(int(outputsize or 100), 5000)),
 
         "timezone":
             "UTC",
@@ -5401,6 +5558,7 @@ def run_strategy():
     twelve_key = os.environ.get(
         "TWELVE_DATA_API_KEY"
     )
+    infoway_key = os.environ.get("INFOWAY_API_KEY", "").strip()
 
     # ========================================================
     # VARIABLES
@@ -5573,10 +5731,23 @@ def run_strategy():
                     f"({symbol})..."
                 )
 
-                candles = fetch_1m_candles(
-                    symbol,
-                    twelve_key
-                )
+                # V16 Gold uses Twelve Data; DXY uses Infoway. Refresh both on
+                # the same 120-second cadence and reuse the latest Gold candles
+                # on the intervening 1-minute scan.
+                if str(asset).upper() in {"GOLD", "XAUUSD"}:
+                    try:
+                        global V16_LAST_GOLD_CANDLES, V16_LAST_GOLD_FETCH
+                        if not V16_LAST_GOLD_CANDLES or time.time() - V16_LAST_GOLD_FETCH >= V16_DXY_FETCH_SECONDS:
+                            V16_LAST_GOLD_FETCH = time.time()  # throttle even failed requests
+                            fresh_gold = fetch_1m_candles(symbol, twelve_key, outputsize=500)
+                            if fresh_gold:
+                                V16_LAST_GOLD_CANDLES = fresh_gold
+                        candles = list(V16_LAST_GOLD_CANDLES)
+                    except Exception as gold_feed_exc:
+                        print(f"V16 Gold refresh skipped: {str(gold_feed_exc)[:200]}")
+                        candles = list(V16_LAST_GOLD_CANDLES)
+                else:
+                    candles = fetch_1m_candles(symbol, twelve_key)
 
                 # =============================================
                 # NO DATA
@@ -5620,6 +5791,20 @@ def run_strategy():
                     send_order_flow_to_kets_website(order_flow_proxy)
                 except Exception as flow_exc:
                     print(f"⚠️ Candle-pressure proxy skipped for {asset}: {str(flow_exc)[:240]}")
+                # V16 pairs the already-fetched XAU/USD candles with Infoway DXY.
+                # DXY is refreshed no more often than every 120 seconds.
+                if str(asset).upper() in {"GOLD", "XAUUSD"}:
+                    try:
+                        global V16_LAST_DXY_CANDLES, V16_LAST_DXY_FETCH
+                        if not V16_LAST_DXY_CANDLES or time.time() - V16_LAST_DXY_FETCH >= V16_DXY_FETCH_SECONDS:
+                            V16_LAST_DXY_FETCH = time.time()  # throttle even failed requests
+                            fresh_dxy = fetch_infoway_dxy_1m_candles(infoway_key, outputsize=500)
+                            if fresh_dxy:
+                                V16_LAST_DXY_CANDLES = fresh_dxy
+                        if V16_LAST_DXY_CANDLES:
+                            send_v16_market_to_kets(candles, V16_LAST_DXY_CANDLES)
+                    except Exception as v16_exc:
+                        print(f"V16 feed update skipped: {str(v16_exc)[:220]}")
 
                 print(
                     f"💵 {asset}: "

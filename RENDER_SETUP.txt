@@ -42,3 +42,9 @@ WEBSITE CONNECTION
 - KETS_SIGNAL_SOURCE_URL points to the website signal endpoint.
 - KETS_SIGNAL_SOURCE_KEY is used as the X-KETS-API-KEY header.
 - Existing website API connection is preserved.
+
+V16 GOLD / DXY UPDATE (2026-11-02)
+- Set INFOWAY_DXY_SYMBOL only if Infoway uses a different DXY code (default: DXY).
+- The V16 feed refreshes XAU/USD from Twelve Data and DXY from Infoway once per 120 seconds and sends the combined snapshot to KETS /api/v16-market.
+- KETS_SIGNAL_SOURCE_KEY (or KETS_API_KEY fallback) must match KETS_SIGNAL_RECEIVER_KEY on the KETS service.
+- The V16 market page is #v16 in KETS. If DXY symbol access is unavailable, the page remains waiting/stale and Auto-Trader will not execute.

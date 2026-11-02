@@ -1,0 +1,27 @@
+V16 GOLD / DXY DATA FEED
+
+- XAU/USD candles are requested from Twelve Data; DXY candles are requested from Infoway.
+- Each symbol is refreshed once per 120-second window. The existing one-minute
+  scanner reuses the last Gold candles between data refreshes.
+- The feed includes M1 source prices plus completed M5 and M15 OHLC aggregation.
+- M5 and M15 direction use the net movement across the last three completed bars.
+- M5 support/resistance breakout uses the preceding 20 completed M5 candles.
+- KETS receives POST /api/v16-market using X-KETS-API-KEY.
+
+Render environment:
+  TWELVE_DATA_API_KEY = your existing Twelve Data key
+  INFOWAY_API_KEY = your Infoway API key
+  INFOWAY_API_KEY = your Infoway API key
+  INFOWAY_DXY_SYMBOL = DXY
+  KETS_API_KEY / KETS_SIGNAL_SOURCE_KEY = matching KETS API key
+  KETS_SIGNAL_SOURCE_URL = https://kets.onrender.com/api/signals
+
+IMPORTANT: Verify that your Twelve Data plan resolves the exact DXY index symbol
+"DXY" for 1-minute time_series. If it returns an unsupported-symbol error, use
+Twelve Data's symbol_search with your own key and set TWELVE_DATA_DXY_SYMBOL to
+its exact supported cash-index symbol. Do not substitute an ETF such as UUP
+without explicitly deciding to use a proxy.
+
+API usage: this V16 feed refreshes two symbols per 120 seconds (two symbol
+credits per two-minute cycle, based on Twelve Data's per-symbol time_series
+credit pricing). Existing weekend BTC scanning remains unchanged.
