@@ -382,7 +382,8 @@ def save_engine_history(
 
 def save_signal_for_api(
     asset,
-    signal
+    signal,
+    candles=None
 ):
 
     now_utc = datetime.datetime.now(
@@ -483,7 +484,16 @@ def save_signal_for_api(
             now_utc.isoformat(),
 
         "status":
-            "ACTIVE"
+            "ACTIVE",
+
+        # Co-pilot receives the same bot signal plus the already-fetched
+        # Gold/BTC scan candles that produced it. This is not a second feed
+        # or a new API request; it lets the website calculate immediately.
+        "copilot_candles": [
+            {k: c[k] for k in ("datetime", "timestamp", "open", "high", "low", "close") if k in c}
+            for c in (candles or [])[-400:]
+            if isinstance(c, dict)
+        ] if str(asset).upper() in ("GOLD", "XAU/USD", "XAUUSD", "XAU") else []
     }
 
     # Preserve the independent SMC source identity in the signal payload
@@ -5876,7 +5886,8 @@ def run_strategy():
                     api_signal = (
                         save_signal_for_api(
                             asset,
-                            signal
+                            signal,
+                            candles
                         )
                     )
 

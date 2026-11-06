@@ -1,0 +1,8 @@
+KETS CO-PILOT DIRECT BOT SIGNAL PAYLOAD — 2026-11-06
+
+- Every GOLD signal sent to KETS /api/signals now carries copilot_candles.
+- These are the latest already-fetched OHLC candles from the same trading-bot scan that generated the signal.
+- No additional market-data API request is made for Co-pilot.
+- The website receives one authenticated bot signal and uses its embedded candle history to calculate the four Co-pilot indicators immediately.
+- BTC signals do not populate the Gold-only Co-pilot.
+- Existing Telegram messages, signal strategy, scoring, market schedule, and trade rules are unchanged.
