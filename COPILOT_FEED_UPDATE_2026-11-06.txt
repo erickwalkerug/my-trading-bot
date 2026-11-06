@@ -1,0 +1,3 @@
+CO-PILOT FEED UPDATE — 2026-11-06
+
+The existing V16 Gold/DXY authenticated market snapshot now includes the latest 400 already-fetched Gold 1-minute OHLC candles. This reuses the existing Twelve Data request and existing 120-second Gold/DXY refresh cadence; it does not add API calls. KETS uses those candles to calculate its own completed M5 EMA 9/21, Stochastic 14/3/3, MACD 12/26/9 and RSI 14 confirmation. No signal generation or Telegram strategy behavior is changed by this feed addition.

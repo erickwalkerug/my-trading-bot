@@ -2999,6 +2999,9 @@ def send_v16_market_to_kets(gold_candles, dxy_candles):
         'opposite_movement':bool(opposite),'paired_breakout':bool(buy_break or sell_break),
         'same_direction':bool(gd == dd and gd in ('BULLISH','BEARISH')),
         'gold_price':float(gold_candles[-1]['close']),'dxy_price':float(dxy_candles[-1]['close']),'dxy_symbol':V16_DXY_SYMBOL,'gold_symbol':'XAU/USD',
+        # Share the already-fetched Gold candles with KETS Co-pilot. No extra
+        # market-data API request is made; KETS calculates its four indicators.
+        'gold_candles':[{k:c[k] for k in ('datetime','open','high','low','close') if k in c} for c in gold_candles[-400:]],
         'timeframes':['M1','M5','M15']}
     url=KETS_SIGNAL_SOURCE_URL.rstrip('/')
     if url.endswith('/api/signals'): url=url[:-len('/api/signals')]+'/api/v16-market'
