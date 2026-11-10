@@ -1,0 +1,5 @@
+CO-PILOT 2 DATA CONTRACT — 2026-11-10
+- The trading bot continues to forward the original completed Gold OHLC candles from its existing Twelve Data scan in copilot_candles.
+- No extra Twelve Data request or new polling loop is required.
+- The sender may forward up to 400 recent records for reliable history; the KETS Co-Pilot 2 calculation deliberately selects only the latest 20 valid completed M1 records for Bollinger Bands (20,2) and Supertrend (10,3).
+- Keep the existing authenticated /api/signals destination and shared-secret configuration unchanged.
